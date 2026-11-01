@@ -4,7 +4,7 @@
 
 Rearrange the partitions on your disk by dragging them in a window. Kitten applies the change during one restart, with no USB stick, and a power cut at any point can't destroy your data.
 
-**Status:** under active development and not yet tested on real hardware. Do not use it on a disk you care about.
+**Status:** under active development.
 
 ## How it works
 
