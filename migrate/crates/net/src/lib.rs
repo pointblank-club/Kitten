@@ -1,9 +1,11 @@
 //! Transport for Kitten Migrate: the [`Link`] trait the sender and receiver talk over, and the
 //! in-memory [`FaultyLink`] that stands in for it in tests, able to drop, duplicate and cut frames
-//! and reconnect — the faults a real TLS-over-TCP link suffers (plan.md task 2.3, §I3).
+//! and reconnect — the faults a TCP link suffers.
 //!
-//! The real TLS transport (rustls + SPAKE2 pairing + length framing) lands on this same `Link`
-//! trait, so every test written against `FaultyLink` holds for it unchanged.
+//! SECURITY: the current transport (`tcp.rs`) is plaintext TCP with NO authentication or
+//! encryption. Mutual authentication and TLS are not implemented yet and are required before
+//! migration ships (see the security audit). An authenticated/encrypted `Link` plugs into this
+//! same trait, so tests written against `FaultyLink` still hold.
 
 pub mod link;
 pub mod tcp;

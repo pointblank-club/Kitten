@@ -22,6 +22,17 @@ pub(crate) fn number_field(text: &str, name: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("missing or unreadable \"{name}\""))
 }
 
+/// Converts a block/extent count into bytes, refusing (rather than wrapping) if the
+/// multiplication overflows. The inputs come from tool output describing an untrusted
+/// disk, so a corrupt or hostile superblock must produce a clean error, not a wrap or
+/// an abort. `overflow-checks` in the release profile would otherwise turn these into a
+/// panic; this keeps them a refusal.
+pub(crate) fn blocks_to_bytes(blocks: u64, block_size: u64) -> Result<u64, String> {
+    blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| format!("{blocks} blocks of {block_size} bytes overflows a 64-bit size"))
+}
+
 /// The parts of `0..total` not covered by `taken`.
 pub(crate) fn complement(mut taken: Vec<Range<u64>>, total: u64) -> Vec<Range<u64>> {
     taken.sort_by_key(|r| r.start);

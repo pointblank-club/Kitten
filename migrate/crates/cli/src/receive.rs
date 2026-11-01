@@ -60,7 +60,12 @@ pub fn run(
     loop {
         match link.recv() {
             Ok(Some(frame)) => {
-                let (_, seq, message) = decode(&frame).context("decoding a frame")?;
+                let (frame_epoch, seq, message) = decode(&frame).context("decoding a frame")?;
+                // Reject frames that do not belong to this run's epoch (replay / cross-run
+                // confusion). Legitimate frames always carry the current epoch.
+                if frame_epoch.0 != epoch.0 {
+                    continue;
+                }
                 match message {
                     Message::Hello { disk_len, .. } => {
                         source_len = disk_len;

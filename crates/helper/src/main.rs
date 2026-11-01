@@ -118,7 +118,22 @@ fn apply(
     static APPLY_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let call = APPLY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let work_dir = std::env::temp_dir().join(format!("bootshiftd-{}-{call}", std::process::id()));
-    let _ = std::fs::create_dir_all(&work_dir);
+    // Create it private (0o700) and fail the call if we cannot: the work dir holds the recovery
+    // initramfs we are about to install, so a world-readable or attacker-pre-created directory in
+    // a shared /tmp must never be silently reused.
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&work_dir)
+            .map_err(|e| {
+                ServiceError::Refused(vec![bootshift_core::refusal::Refusal::new(
+                    format!("could not create a private work directory: {e}"),
+                    "check permissions on the system temp directory and retry",
+                )])
+            })?;
+    }
     let result = service::apply(
         &SystemRunner,
         &SystemPaths::default(),

@@ -19,8 +19,10 @@ pub async fn require(
 ) -> fdo::Result<()> {
     // Demo-only escape hatch (set by `cargo xtask demo-gui`): the GUI reaches the helper over a
     // forwarded bus with no polkit agent to prompt, so skip the authorization check. This waives
-    // *who may call*, never any data-safety check; it is off unless this variable is set.
-    if std::env::var_os("BOOTSHIFT_SKIP_POLKIT").is_some() {
+    // *who may call*, never any data-safety check. Compile-gated to debug builds via
+    // `cfg!(debug_assertions)`, so it is dead code in a release/packaged daemon and cannot bypass
+    // authorization there even if the variable is set.
+    if cfg!(debug_assertions) && std::env::var_os("BOOTSHIFT_SKIP_POLKIT").is_some() {
         eprintln!(
             "bootshiftd: BOOTSHIFT_SKIP_POLKIT is set, not checking authorization for {action}"
         );

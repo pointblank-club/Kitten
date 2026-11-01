@@ -6,3 +6,22 @@ Description=Kitten partition helper
 Type=dbus
 BusName=org.bootshift.Helper1
 ExecStart=/usr/libexec/bootshift/bootshiftd
+
+# Hardening. The helper runs as root and drives disk tools, so it needs raw block
+# device and tool access; the sandbox below removes everything it does NOT need.
+# Deliberately NOT set, because they would break the helper's job:
+#   PrivateDevices / ProtectSystem=strict  -> needed to read/write /dev/<disk> and the ESP.
+NoNewPrivileges=yes
+# The debug-only polkit bypass is also compiled out of release builds; clearing it here
+# is defence in depth so a stray environment entry can never reach the service.
+UnsetEnvironment=BOOTSHIFT_SKIP_POLKIT
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

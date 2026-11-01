@@ -158,9 +158,9 @@ impl<D: BlockDevice + ?Sized, F: Filesystems> Executor<'_, D, F> {
                 let scope = self.journal.recorded_scope(self.disk, index)?;
                 let sector_size = u64::from(self.sector_size());
                 let job = MoveJob {
-                    source: from.0 * sector_size,
-                    destination: to.0 * sector_size,
-                    len: len.0 * sector_size,
+                    source: from.0.saturating_mul(sector_size),
+                    destination: to.0.saturating_mul(sector_size),
+                    len: len.0.saturating_mul(sector_size),
                     scope,
                 };
                 let outcome = move_range_with(

@@ -23,6 +23,10 @@ pub struct IncomingChunk {
     pub data: Vec<u8>,
 }
 
+/// Largest plausible jump in the frame sequence between applied batches; a larger jump is
+/// treated as an injected frame rather than a real advance.
+const SANE_SEQ_ADVANCE: u64 = 1_000_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     #[error(transparent)]
@@ -35,6 +39,10 @@ pub enum ApplyError {
     VerifyFailed,
     #[error("an empty batch")]
     EmptyBatch,
+    #[error("a chunk's payload length did not match its declared range")]
+    LengthMismatch,
+    #[error("the sequence number jumped implausibly far (possible injected frame)")]
+    SequenceJumped,
 }
 
 pub struct Applier {
@@ -91,9 +99,22 @@ impl Applier {
         if last <= self.acked {
             return Ok(self.acked);
         }
+        // An injected frame with an absurd sequence number would jump the acknowledgement
+        // watermark and silently skip real chunks. A legitimate batch advances it by roughly its
+        // chunk count; reject an implausible jump. (The real fix is authenticating the link; this
+        // bounds the damage from an unauthenticated peer.)
+        if last.0.saturating_sub(self.acked.0) > SANE_SEQ_ADVANCE {
+            return Err(ApplyError::SequenceJumped);
+        }
         // 1. Write every chunk to its mapped target offset.
         for chunk in batch {
             let target_range = self.target_range(chunk.source)?;
+            // The write length must equal the range the sender declared; otherwise a chunk could
+            // write past its own range (the read-back below would still pass, re-reading the same
+            // bytes).
+            if chunk.data.len() as u64 != target_range.len() {
+                return Err(ApplyError::LengthMismatch);
+            }
             target.write_at(target_range.start, &chunk.data)?;
         }
         // 2. Flush the target (M3: data durable before it is recorded).

@@ -3,7 +3,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use crate::parse::{complement, field, number_field, unexpected};
+use crate::parse::{blocks_to_bytes, complement, field, number_field, unexpected};
 use crate::run::{CommandLine, RunError, Runner};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,8 +18,10 @@ pub struct Ext4Summary {
 }
 
 impl Ext4Summary {
+    /// Saturates rather than wrapping on overflow: a filesystem claiming more bytes than
+    /// a u64 can hold will be larger than any real device and get refused downstream.
     pub fn len_bytes(&self) -> u64 {
-        self.block_count * self.block_size
+        self.block_count.saturating_mul(self.block_size)
     }
 }
 
@@ -41,7 +43,7 @@ pub fn min_size(runner: &dyn Runner, device: &Path, block_size: u64) -> Result<u
     let command = CommandLine::new("resize2fs").arg("-P").path(device);
     let output = runner.run_ok(&command)?;
     number_field(&output.text(), "Estimated minimum size of the filesystem")
-        .map(|blocks| blocks * block_size)
+        .and_then(|blocks| blocks_to_bytes(blocks, block_size))
         .map_err(|detail| unexpected(&command, detail))
 }
 
@@ -109,10 +111,13 @@ pub fn parse_used_ranges(dumpe2fs: &str) -> Result<Vec<Range<u64>>, String> {
             summary.free_blocks
         ));
     }
-    Ok(complement(free, summary.block_count)
+    complement(free, summary.block_count)
         .into_iter()
-        .map(|r| r.start * summary.block_size..r.end * summary.block_size)
-        .collect())
+        .map(|r| {
+            Ok(blocks_to_bytes(r.start, summary.block_size)?
+                ..blocks_to_bytes(r.end, summary.block_size)?)
+        })
+        .collect()
 }
 
 /// Parses `12` or `12-40` (inclusive) into a half-open block range.
