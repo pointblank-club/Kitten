@@ -13,6 +13,13 @@ The package installs the GUI, the `bootshiftd` helper, the static `bootshift` bi
 boot uses, and the D-Bus, polkit and systemd files. It pulls in the filesystem tools as
 dependencies. `packaging/nfpm.yaml` lists every file and dependency.
 
+## Supported distros
+
+The GUI and helper are built on the `ubuntu-24.04` runner and need its glibc (2.39) or newer:
+Ubuntu 24.04+, Linux Mint 22+, Debian 13+, Fedora 40+. Debian 12 and Ubuntu 22.04 are too old for
+the packages; the static CLI tarball runs anywhere. Moving the runner to a newer image raises this
+floor, so change this list and the release notes with it.
+
 ## Steps
 
 1. Make sure CI is green on `main`, and run the end-to-end proof locally:
@@ -47,4 +54,5 @@ dependencies. `packaging/nfpm.yaml` lists every file and dependency.
 
 Start with who should and shouldn't use this build. Until the real-hardware gate in `task.md`
 (15.2) passes, every release is a pre-release and the notes say so, along with "back up your data
-first" and which distros, filesystems and boot setups were tested.
+first", the supported distros above, and which distros, filesystems and boot setups were
+actually tested.

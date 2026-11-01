@@ -16,7 +16,9 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: bootshiftd and the GUI link against this image's glibc (2.39), so
+    # the runner sets the oldest distro the packages install on. See docs/releasing.md.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
