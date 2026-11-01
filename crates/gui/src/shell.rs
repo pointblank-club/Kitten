@@ -224,10 +224,14 @@ fn brand(ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 9.0;
         let tex = logo_texture(ui.ctx());
-        let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+        let (badge, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+        // The logo is a white cat on a transparent ground, so it needs a dark app-icon badge
+        // to read on the light rail. A small inset keeps the green halo clear of the corners.
+        ui.painter()
+            .rect_filled(badge, 6, Color32::from_rgb(0x1b, 0x1a, 0x17));
         ui.painter().image(
             tex.id(),
-            mark,
+            badge.shrink(2.0),
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
