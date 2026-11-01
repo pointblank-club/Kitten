@@ -162,6 +162,9 @@ pub fn run(
                             epoch,
                         )?;
                         batch_bytes = 0;
+                        // The PassEnd consumed this seq without a chunk; bridge it so the next pass's
+                        // first chunk stays contiguous and is not discarded by the coverage walk.
+                        applier.cover_control_seq(seq);
                         println!(
                             "receive: pass complete, acknowledged through seq {}",
                             applier.acked().0

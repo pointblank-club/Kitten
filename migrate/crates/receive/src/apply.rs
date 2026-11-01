@@ -95,6 +95,19 @@ impl Applier {
         self.acked
     }
 
+    /// Account for a control frame (a PassEnd between passes) that consumed a sequence number but
+    /// carried no chunk. The sender increments one shared seq counter for both chunks and the
+    /// trailing PassEnd, so after a pass acknowledged through K the PassEnd takes K+1 and the next
+    /// pass's first chunk is K+2. Without bridging K+1 here, the coverage walk in `apply_batch`
+    /// would stall at that gap and silently discard every following pass. Only advances across the
+    /// single seq immediately after the watermark, so it can never skip a real (data) seq.
+    /// NOTE: the two-VM migrate-rig is the authoritative validation of multi-pass convergence.
+    pub fn cover_control_seq(&mut self, seq: FrameSeq) {
+        if seq.0 == self.acked.0.saturating_add(1) {
+            self.acked = seq;
+        }
+    }
+
     /// Applies one batch and returns the sequence now acknowledged. A batch already covered by
     /// `acked` is a no-op (idempotent resume).
     pub fn apply_batch(
@@ -349,6 +362,57 @@ mod tests {
         assert!(
             resumed_same.acked().0 > 0,
             "the same run_id/epoch must resume its watermark"
+        );
+    }
+
+    #[test]
+    fn a_pass_end_seq_gap_does_not_discard_the_next_pass() {
+        // Models the real multi-pass protocol: the sender's PassEnd consumes a seq that is never
+        // sent as a chunk, so the next pass's first chunk is two past the last acknowledged chunk.
+        // Without cover_control_seq bridging the PassEnd seq, the coverage walk would stall and the
+        // whole delta pass would be silently dropped (the convergence regression).
+        let source = source();
+        let mut target = MemDisk::zeroed(SRC_LEN as usize, 4096).expect("target");
+        let mut scratch = MemDisk::zeroed(32 << 20, 4096).expect("scratch");
+        let mut applier = Applier::new(1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN);
+        let chunks = single_chunks(&source, 256 * 1024); // seqs 1..=16
+
+        // Bulk pass: apply seqs 1..=2, then its PassEnd consumes seq 3.
+        {
+            let mut store = Store::new(&mut scratch);
+            applier
+                .apply_batch(&mut store, &mut target, &chunks[0..2])
+                .expect("bulk pass");
+        }
+        assert_eq!(applier.acked(), FrameSeq(2));
+        applier.cover_control_seq(FrameSeq(3)); // the bulk PassEnd's seq
+        assert_eq!(
+            applier.acked(),
+            FrameSeq(3),
+            "the PassEnd seq must be bridged"
+        );
+
+        // Delta pass: its first chunk is seq 4 (never 3). Re-cover source blocks 2 and 3 at seqs 4,5.
+        let delta: Vec<IncomingChunk> = chunks[2..4]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| IncomingChunk {
+                seq: FrameSeq(4 + i as u64),
+                source: c.source,
+                hash: c.hash,
+                data: c.data.clone(),
+            })
+            .collect();
+        let acked = {
+            let mut store = Store::new(&mut scratch);
+            applier
+                .apply_batch(&mut store, &mut target, &delta)
+                .expect("delta pass")
+        };
+        assert_eq!(
+            acked,
+            FrameSeq(5),
+            "the delta pass must be applied, not discarded at the PassEnd gap"
         );
     }
 

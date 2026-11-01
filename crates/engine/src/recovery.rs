@@ -73,12 +73,16 @@ pub fn run(
     let mut journal = opened.journal;
 
     if opened.progress.is_none() {
-        let refusal = if !table_matches(&disk, &run)? {
-            Some(RecoveryError::LayoutChanged)
-        } else {
-            check_table_writes(&disk, &run.layout, &run.plan)
+        // On a fresh run, every reason we can't carry out the plan must reach restore_booting below,
+        // never propagate before it, or the GRUB redirect is left in place and the machine
+        // boot-loops into recovery. A table_matches error is now possible (entries() rejects a
+        // corrupt/out-of-range GPT), so route it to the same safe path as a changed layout.
+        let refusal = match table_matches(&disk, &run) {
+            Ok(true) => check_table_writes(&disk, &run.layout, &run.plan)
                 .err()
-                .map(RecoveryError::CantCarryOut)
+                .map(RecoveryError::CantCarryOut),
+            Ok(false) => Some(RecoveryError::LayoutChanged),
+            Err(error) => Some(error),
         };
         if let Some(refusal) = refusal {
             restore_booting(runner, disk_path, &run.boot, &work_dir.join("esp"))?;
@@ -252,6 +256,31 @@ mod tests {
 
         assert!(table_matches(&planned, &run).unwrap());
         assert!(!table_matches(&disk_with_partition(200), &run).unwrap());
+    }
+
+    fn disk_with_reversed_partition() -> MemDisk {
+        // An entry whose ending_lba precedes its starting_lba: a corrupt/crafted table that
+        // entries() must reject rather than let its length arithmetic wrap.
+        let mut cursor = Cursor::new(vec![0; 1 << 20]);
+        let mut gpt = GPT::new_from(&mut cursor, 512, [0xAB; 16]).unwrap();
+        gpt[1] = gptman::GPTPartitionEntry {
+            partition_type_guid: [0xAF; 16],
+            unique_partition_guid: [1; 16],
+            starting_lba: 500,
+            ending_lba: 100,
+            attribute_bits: 0,
+            partition_name: "data".into(),
+        };
+        gpt.write_into(&mut cursor).unwrap();
+        MemDisk::from_bytes(cursor.into_inner(), 512).unwrap()
+    }
+
+    #[test]
+    fn a_corrupt_gpt_makes_table_matches_refuse_not_abort() {
+        // table_matches surfaces the corrupt table as an Err (from entries()), which run() routes to
+        // restore_booting on a fresh run instead of propagating before the safety net (ENG-02).
+        let run = run_for(&disk_with_partition(100));
+        assert!(table_matches(&disk_with_reversed_partition(), &run).is_err());
     }
 
     #[test]

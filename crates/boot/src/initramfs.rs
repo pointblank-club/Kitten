@@ -165,9 +165,17 @@ pub fn shared_libraries(runner: &dyn Runner, binary: &Path) -> Result<Vec<PathBu
     // non-zero exit (ldd missing, wrong architecture, unreadable) is ambiguous and fails closed,
     // rather than being mistaken for a static binary and dropping its libraries from the image.
     let stdout = output.text();
-    let is_static = ["not a dynamic executable", "statically linked"]
-        .iter()
-        .any(|&marker| stdout.contains(marker) || output.stderr.contains(marker));
+    // Markers that mean "this binary is static, so it loads no shared libraries". The first two are
+    // glibc's ldd; "Not a valid dynamic program" is musl's. On any other message we fall through and
+    // fail closed below (refuse to build the image) rather than guess — that is a build-time refusal
+    // with no data risk, never a silently dynamic binary. Add a marker here if another libc differs.
+    let is_static = [
+        "not a dynamic executable",
+        "statically linked",
+        "Not a valid dynamic program",
+    ]
+    .iter()
+    .any(|&marker| stdout.contains(marker) || output.stderr.contains(marker));
     if is_static {
         return Ok(Vec::new());
     }
