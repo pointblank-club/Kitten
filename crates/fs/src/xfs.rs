@@ -67,9 +67,15 @@ impl Geometry {
                 })
                 .ok_or_else(|| format!("no {name} in the superblock output"))
         };
+        let blocksize = field("blocksize")?;
+        if blocksize == 0 {
+            // A zero block size collapses every used range to 0..0, so the mover would skip live
+            // data. Refuse it rather than trusting a corrupt superblock.
+            return Err("blocksize is zero".to_string());
+        }
         Ok(Self {
             dblocks: field("dblocks")?,
-            blocksize: field("blocksize")?,
+            blocksize,
             agblocks: field("agblocks")?,
             logstart: field("logstart")?,
             rbmblocks: field("rbmblocks")?,

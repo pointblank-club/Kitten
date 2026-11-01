@@ -64,7 +64,10 @@ impl RecoveryArgs {
                 device_offset,
                 len,
             });
-            file_offset += len;
+            // This parses untrusted recovery args and runs as PID 1 in the recovery system, where a
+            // panic is a kernel panic. Refuse an overflowing cumulative offset rather than relying on
+            // release overflow-checks to abort.
+            file_offset = file_offset.checked_add(len).ok_or_else(malformed)?;
         }
         Ok(RecoveryArgs { disk_guid, journal })
     }

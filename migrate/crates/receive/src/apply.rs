@@ -43,6 +43,8 @@ pub enum ApplyError {
     LengthMismatch,
     #[error("the sequence number jumped implausibly far (possible injected frame)")]
     SequenceJumped,
+    #[error("the batch skipped ahead of the acknowledged sequence or had an internal gap")]
+    SequenceGap,
 }
 
 pub struct Applier {
@@ -99,10 +101,32 @@ impl Applier {
         if last <= self.acked {
             return Ok(self.acked);
         }
+        // The batch must connect, gap-free, to what we have already acknowledged. The acknowledgement
+        // watermark advances to this batch's last seq, so if a batch could begin past `acked + 1` or
+        // skip a seq internally, the ranges of the skipped chunks would be left stale while their
+        // sequence numbers were marked durable: one injected frame whose seq merely exceeds `acked`
+        // would silently discard real chunks. A magnitude bound alone (below) does not stop this.
+        //
+        // We allow the batch to begin at or before `acked + 1` (not only exactly at it): a lossy-link
+        // resume has the sender replay from *its* last ack, which can precede ours, so a batch may
+        // re-include already-acknowledged chunks. Re-applying them is idempotent (identical bytes).
+        // What we forbid is skipping ahead of `acked + 1`, or any internal gap.
+        //
+        // NOTE: this closes the forward-jump hole; it does not authenticate the peer. An attacker who
+        // supplies every intermediate chunk contiguously can still write its own bytes (that is the
+        // unauthenticated-transport gap tracked separately). End-to-end validation still needs the
+        // two-VM migrate-rig against a live sender.
+        let first = batch.first().ok_or(ApplyError::EmptyBatch)?.seq;
+        if first.0 > self.acked.0.saturating_add(1) {
+            return Err(ApplyError::SequenceGap);
+        }
+        for pair in batch.windows(2) {
+            if pair[1].seq.0 != pair[0].seq.0.saturating_add(1) {
+                return Err(ApplyError::SequenceGap);
+            }
+        }
         // An injected frame with an absurd sequence number would jump the acknowledgement
-        // watermark and silently skip real chunks. A legitimate batch advances it by roughly its
-        // chunk count; reject an implausible jump. (The real fix is authenticating the link; this
-        // bounds the damage from an unauthenticated peer.)
+        // watermark; reject an implausible total advance as a second line of defence.
         if last.0.saturating_sub(self.acked.0) > SANE_SEQ_ADVANCE {
             return Err(ApplyError::SequenceJumped);
         }
@@ -267,5 +291,68 @@ mod tests {
                 .expect("apply");
         }
         assert_eq!(target.bytes(), source.bytes());
+    }
+
+    /// Individual single-chunk "batches" of the source, numbered from 1.
+    fn single_chunks(source: &MemDisk, chunk_len: u64) -> Vec<IncomingChunk> {
+        batches(source, chunk_len, 1)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn a_batch_skipping_ahead_of_the_ack_is_rejected() {
+        // The watermark-poisoning case: a frame whose seq is beyond acked + 1 must not advance
+        // the acknowledgement past the chunks it skipped.
+        let source = source();
+        let mut target = MemDisk::zeroed(SRC_LEN as usize, 4096).expect("target");
+        let mut scratch = MemDisk::zeroed(32 << 20, 4096).expect("scratch");
+        let mut applier = Applier::new(1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN);
+        let chunks = single_chunks(&source, 256 * 1024);
+        // acked starts at 0, so acked + 1 == 1; a batch beginning at seq 6 skips 1..=5.
+        let jumped = vec![chunks[5].clone()];
+        let mut store = Store::new(&mut scratch);
+        let result = applier.apply_batch(&mut store, &mut target, &jumped);
+        assert!(matches!(result, Err(ApplyError::SequenceGap)));
+    }
+
+    #[test]
+    fn a_batch_with_an_internal_gap_is_rejected() {
+        let source = source();
+        let mut target = MemDisk::zeroed(SRC_LEN as usize, 4096).expect("target");
+        let mut scratch = MemDisk::zeroed(32 << 20, 4096).expect("scratch");
+        let mut applier = Applier::new(1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN);
+        let chunks = single_chunks(&source, 256 * 1024);
+        // seq 1 then seq 3: starts correctly at acked + 1 but skips seq 2 inside the batch.
+        let gapped = vec![chunks[0].clone(), chunks[2].clone()];
+        let mut store = Store::new(&mut scratch);
+        let result = applier.apply_batch(&mut store, &mut target, &gapped);
+        assert!(matches!(result, Err(ApplyError::SequenceGap)));
+    }
+
+    #[test]
+    fn a_resend_that_re_includes_acked_chunks_is_accepted() {
+        // A lossy-link resume may replay from before our ack; re-including acked chunks is fine.
+        let source = source();
+        let mut target = MemDisk::zeroed(SRC_LEN as usize, 4096).expect("target");
+        let mut scratch = MemDisk::zeroed(32 << 20, 4096).expect("scratch");
+        let mut applier = Applier::new(1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN);
+        let chunks = single_chunks(&source, 256 * 1024);
+        // Apply seq 1..=2.
+        {
+            let mut store = Store::new(&mut scratch);
+            applier
+                .apply_batch(&mut store, &mut target, &chunks[0..2])
+                .expect("apply 1..=2");
+        }
+        // Resend seq 2..=4 (re-includes the acked seq 2, then extends contiguously).
+        {
+            let mut store = Store::new(&mut scratch);
+            let acked = applier
+                .apply_batch(&mut store, &mut target, &chunks[1..4])
+                .expect("apply 2..=4");
+            assert_eq!(acked, FrameSeq(4));
+        }
     }
 }

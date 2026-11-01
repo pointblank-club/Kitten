@@ -177,8 +177,14 @@ impl ChunkCopier {
                 Ok(()) => {}
                 Err(DiskError::Io { .. }) => {
                     let lost = read_block_by_block(device, source + piece.start, buf, block)?;
+                    // The bulk read failed, but the per-block retry may have recovered every block
+                    // (a transient controller/link fault), leaving `lost` empty and the data good.
+                    // Only a genuinely unreadable block is fatal. Indexing `lost[0]` unconditionally
+                    // here would panic — and this runs as PID 1 in the recovery system.
                     if !self.options.accept_unreadable {
-                        return Err(CopyError::Unreadable { offset: lost[0] });
+                        if let Some(&offset) = lost.first() {
+                            return Err(CopyError::Unreadable { offset });
+                        }
                     }
                     self.unreadable.extend(lost);
                 }

@@ -12,9 +12,11 @@ ExecStart=/usr/libexec/bootshift/bootshiftd
 # Deliberately NOT set, because they would break the helper's job:
 #   PrivateDevices / ProtectSystem=strict  -> needed to read/write /dev/<disk> and the ESP.
 NoNewPrivileges=yes
-# The debug-only polkit bypass is also compiled out of release builds; clearing it here
-# is defence in depth so a stray environment entry can never reach the service.
+# These debug-only overrides are also compiled out of release builds; clearing them here is
+# defence in depth so a stray environment entry can never reach the service. SKIP_POLKIT would
+# waive authorization; EXTRA_KERNEL_ARGS would inject arguments into the recovery boot command line.
 UnsetEnvironment=BOOTSHIFT_SKIP_POLKIT
+UnsetEnvironment=BOOTSHIFT_EXTRA_KERNEL_ARGS
 PrivateTmp=yes
 ProtectHome=yes
 ProtectKernelLogs=yes

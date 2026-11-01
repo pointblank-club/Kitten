@@ -120,11 +120,14 @@ fn apply(
     let work_dir = std::env::temp_dir().join(format!("bootshiftd-{}-{call}", std::process::id()));
     // Create it private (0o700) and fail the call if we cannot: the work dir holds the recovery
     // initramfs we are about to install, so a world-readable or attacker-pre-created directory in
-    // a shared /tmp must never be silently reused.
+    // a shared /tmp must never be silently reused. `recursive(false)` is deliberate: it errors
+    // (AlreadyExists) instead of adopting a pre-existing directory with someone else's mode, which
+    // `recursive(true)` would do — the parent temp dir already exists, and the pid+counter name
+    // makes a legitimate collision practically impossible.
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
-            .recursive(true)
+            .recursive(false)
             .mode(0o700)
             .create(&work_dir)
             .map_err(|e| {

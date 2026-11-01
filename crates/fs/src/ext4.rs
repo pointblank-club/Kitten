@@ -78,8 +78,14 @@ pub fn parse_summary(text: &str) -> Result<Ext4Summary, String> {
         Some(_) => number_field(text, "FS Error count")?,
         None => 0,
     };
+    let block_size = number_field(text, "Block size")?;
+    if block_size == 0 {
+        // A zero block size would collapse every used byte-range to 0..0 (blocks_to_bytes with a
+        // zero multiplier), so the mover would skip live data. Refuse it like NTFS already does.
+        return Err("block size is zero".to_string());
+    }
     Ok(Ext4Summary {
-        block_size: number_field(text, "Block size")?,
+        block_size,
         block_count: number_field(text, "Block count")?,
         free_blocks: number_field(text, "Free blocks")?,
         clean: state == "clean",
@@ -120,17 +126,29 @@ pub fn parse_used_ranges(dumpe2fs: &str) -> Result<Vec<Range<u64>>, String> {
         .collect()
 }
 
-/// Parses `12` or `12-40` (inclusive) into a half-open block range.
+/// Parses `12` or `12-40` (inclusive) into a half-open block range. The values come from
+/// untrusted `dumpe2fs` output, so a reversed range or a block number at `u64::MAX` must be a
+/// clean error, not a reversed span or (under release `overflow-checks`) a process abort.
 fn parse_block_range(item: &str) -> Result<Range<u64>, String> {
     let parse = |s: &str| {
         s.parse::<u64>()
             .map_err(|_| format!("bad block number in \"{item}\""))
     };
+    let end_after = |last: u64| {
+        last.checked_add(1)
+            .ok_or_else(|| format!("block range ends at u64::MAX in \"{item}\""))
+    };
     match item.split_once('-') {
-        Some((first, last)) => Ok(parse(first)?..parse(last)? + 1),
+        Some((first, last)) => {
+            let (first, last) = (parse(first)?, parse(last)?);
+            if first > last {
+                return Err(format!("reversed block range \"{item}\""));
+            }
+            Ok(first..end_after(last)?)
+        }
         None => {
             let block = parse(item)?;
-            Ok(block..block + 1)
+            Ok(block..end_after(block)?)
         }
     }
 }

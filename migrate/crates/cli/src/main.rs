@@ -115,6 +115,10 @@ enum Command {
         /// Port for the nvme-tcp export.
         #[arg(long, default_value_t = 4421)]
         port: u16,
+        /// Restrict the nvme-tcp export to this initiator NQN. Without it, any host that can
+        /// reach the port can read and write the snapshot.
+        #[arg(long)]
+        host_nqn: Option<String>,
         /// Tear the rehearsal down.
         #[arg(long)]
         end: bool,
@@ -138,6 +142,10 @@ enum Command {
         port: u16,
         #[arg(long, default_value = DEFAULT_NQN)]
         nqn: String,
+        /// Restrict the export to this initiator (sender) NQN. Without it, any host that can
+        /// reach the port can read and write the target disk.
+        #[arg(long)]
+        host_nqn: Option<String>,
     },
     /// Mirror mode (sender): connect the target leg and mirror the LV onto it until it is in sync.
     MirrorAttach {
@@ -258,7 +266,14 @@ fn main() -> anyhow::Result<()> {
             listen,
             port,
             nqn,
-        } => mirror::export(&dev.to_string_lossy(), &listen, port, &nqn),
+            host_nqn,
+        } => mirror::export(
+            &dev.to_string_lossy(),
+            &listen,
+            port,
+            &nqn,
+            host_nqn.as_deref(),
+        ),
         Command::MirrorAttach {
             addr,
             port,
@@ -280,6 +295,7 @@ fn main() -> anyhow::Result<()> {
             name,
             export,
             port,
+            host_nqn,
             end,
         } => {
             let nqn = "nqn.2026-10.org.bootshift:rehearse";
@@ -287,7 +303,7 @@ fn main() -> anyhow::Result<()> {
                 rehearse::end(&name, export.then_some((port, nqn)))
             } else {
                 let cow = cow.ok_or_else(|| anyhow::anyhow!("rehearse needs --cow <device>"))?;
-                let export = export.then_some(("0.0.0.0", port, nqn));
+                let export = export.then_some(("0.0.0.0", port, nqn, host_nqn.as_deref()));
                 rehearse::start(
                     &data.to_string_lossy(),
                     &cow.to_string_lossy(),
