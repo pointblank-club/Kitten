@@ -146,7 +146,9 @@ pub fn shows_focus(ui: &Ui, response: &Response) -> bool {
     response.has_focus() && !ui.input(|i| i.pointer.any_down())
 }
 
-const SECONDARY_HOVER: Color32 = Color32::from_rgb(0x24, 0x24, 0x2b);
+// A light grey hover for the (white, outlined) secondary buttons. It must stay light: the ink is
+// `theme::INK`, so a dark hover fill would render the label dark-on-dark.
+const SECONDARY_HOVER: Color32 = Color32::from_rgb(0xec, 0xea, 0xe4);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
