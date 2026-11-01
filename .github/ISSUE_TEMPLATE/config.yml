@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security or data-loss vulnerability
-    url: https://github.com/devalgupta404/HackmanX/security/advisories/new
+    url: https://github.com/pointblank-club/Kitten/security/advisories/new
     about: Please report security and data-safety vulnerabilities privately, not as a public issue. See SECURITY.md.
   - name: Question or discussion
-    url: https://github.com/devalgupta404/HackmanX/discussions
+    url: https://github.com/pointblank-club/Kitten/discussions
     about: Ask a question or discuss an idea before filing an issue.

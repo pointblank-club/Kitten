@@ -16,7 +16,7 @@ description: |
   The change is applied in one restart, with no USB stick, and a power cut
   at any moment must not lose data.
 vendor: Kitten
-homepage: https://github.com/devalgupta404/HackmanX
+homepage: https://github.com/pointblank-club/Kitten
 license: GPL-3.0-or-later
 
 # The paths below are fixed: bootshiftd.service, the D-Bus activation file and the helper's
