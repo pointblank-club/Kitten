@@ -1,0 +1,104 @@
+# Builds kitten.deb and kitten.rpm with nfpm (https://nfpm.goreleaser.com).
+# Run from the repository root after the release build, with VERSION set to the Cargo version:
+#   VERSION=0.1.0 nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+# .github/workflows/release.yml does all of this when a v* tag is pushed.
+
+name: kitten
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: admin
+priority: optional
+maintainer: Deval Gupta <devalgupta4@gmail.com>
+description: |
+  Rearrange disk partitions by dragging them in a window.
+  The change is applied in one restart, with no USB stick, and a power cut
+  at any moment must not lose data.
+vendor: Kitten
+homepage: https://github.com/pointblank-club/Kitten
+license: GPL-3.0-or-later
+
+# The paths below are fixed: bootshiftd.service, the D-Bus activation file and the helper's
+# RECOVERY_BINARY constant all name /usr/libexec/bootshift/.
+contents:
+  - src: target/x86_64-unknown-linux-musl/release/bootshift
+    dst: /usr/libexec/bootshift/bootshift
+    file_info: { mode: 0755 }
+  - src: /usr/libexec/bootshift/bootshift
+    dst: /usr/bin/bootshift
+    type: symlink
+  - src: target/release/bootshiftd
+    dst: /usr/libexec/bootshift/bootshiftd
+    file_info: { mode: 0755 }
+  - src: target/release/bootshift-gui
+    dst: /usr/bin/bootshift-gui
+    file_info: { mode: 0755 }
+
+  - src: packaging/systemd/bootshiftd.service
+    dst: /usr/lib/systemd/system/bootshiftd.service
+  - src: packaging/dbus/org.bootshift.Helper1.conf
+    dst: /usr/share/dbus-1/system.d/org.bootshift.Helper1.conf
+  - src: packaging/dbus/org.bootshift.Helper1.service
+    dst: /usr/share/dbus-1/system-services/org.bootshift.Helper1.service
+  - src: packaging/polkit/org.bootshift.policy
+    dst: /usr/share/polkit-1/actions/org.bootshift.policy
+
+  - src: packaging/kitten.desktop
+    dst: /usr/share/applications/kitten.desktop
+  # pixmaps takes any icon size; the hicolor theme would need the logo resized to a standard one.
+  - src: assets/logo.png
+    dst: /usr/share/pixmaps/kitten.png
+
+  - src: LICENSE
+    dst: /usr/share/doc/kitten/copyright
+    packager: deb
+  - src: LICENSE
+    dst: /usr/share/licenses/kitten/LICENSE
+    packager: rpm
+
+scripts:
+  postinstall: packaging/scripts/reload-services.sh
+  postremove: packaging/scripts/reload-services.sh
+
+# Every tool the recovery system can call is a hard dependency, including the Btrfs and XFS ones
+# that boot::initramfs::OPTIONAL_TOOLS skips when absent: preflight allows a Btrfs or XFS resize
+# without checking for them, so a missing tool would only show up after the restart, mid-plan.
+# Package names differ between the two families.
+overrides:
+  deb:
+    depends:
+      - e2fsprogs
+      - ntfs-3g
+      - util-linux
+      - mount
+      - fdisk
+      - efibootmgr
+      - kmod
+      - zstd
+      - smartmontools
+      - btrfs-progs
+      - xfsprogs
+      - dbus
+      - polkitd | policykit-1
+      - systemd
+      - libgl1
+      - libegl1
+      - libxkbcommon0
+  rpm:
+    depends:
+      - e2fsprogs
+      - ntfsprogs
+      - util-linux
+      - efibootmgr
+      - kmod
+      - zstd
+      - smartmontools
+      - btrfs-progs
+      - xfsprogs
+      - dbus
+      - polkit
+      - systemd
+      - mesa-libGL
+      - mesa-libEGL
+      - libxkbcommon

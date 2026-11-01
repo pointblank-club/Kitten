@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Kitten
+GenericName=Partition Mover
+Comment=Rearrange disk partitions by dragging them
+Exec=bootshift-gui
+Icon=kitten
+Terminal=false
+Categories=System;Filesystem;
+Keywords=partition;disk;resize;move;
