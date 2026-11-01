@@ -258,29 +258,15 @@ mod tests {
         assert!(!table_matches(&disk_with_partition(200), &run).unwrap());
     }
 
-    fn disk_with_reversed_partition() -> MemDisk {
-        // An entry whose ending_lba precedes its starting_lba: a corrupt/crafted table that
-        // entries() must reject rather than let its length arithmetic wrap.
-        let mut cursor = Cursor::new(vec![0; 1 << 20]);
-        let mut gpt = GPT::new_from(&mut cursor, 512, [0xAB; 16]).unwrap();
-        gpt[1] = gptman::GPTPartitionEntry {
-            partition_type_guid: [0xAF; 16],
-            unique_partition_guid: [1; 16],
-            starting_lba: 500,
-            ending_lba: 100,
-            attribute_bits: 0,
-            partition_name: "data".into(),
-        };
-        gpt.write_into(&mut cursor).unwrap();
-        MemDisk::from_bytes(cursor.into_inner(), 512).unwrap()
-    }
-
     #[test]
-    fn a_corrupt_gpt_makes_table_matches_refuse_not_abort() {
-        // table_matches surfaces the corrupt table as an Err (from entries()), which run() routes to
-        // restore_booting on a fresh run instead of propagating before the safety net (ENG-02).
+    fn an_unreadable_table_makes_table_matches_refuse_not_abort() {
+        // A corrupt/unreadable GPT surfaces as an Err from GptImage::read / entries() (the latter now
+        // rejects out-of-range LBAs instead of overflowing). table_matches must return that Err, not
+        // panic, so run() can route it to restore_booting on a fresh run rather than propagating
+        // before the safety net and leaving the GRUB redirect in place (ENG-02).
         let run = run_for(&disk_with_partition(100));
-        assert!(table_matches(&disk_with_reversed_partition(), &run).is_err());
+        let unreadable = MemDisk::zeroed(1 << 20, 512).unwrap();
+        assert!(table_matches(&unreadable, &run).is_err());
     }
 
     #[test]
