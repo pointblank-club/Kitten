@@ -616,27 +616,19 @@ fn buttons(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
                 Action::Show(Screen::Arrange),
             );
         }
+        // Once the change is prepared the only thing left is to restart, so offer no action here:
+        // the status line says what to do and the rail's Goals tab is always there to go back.
+        // A button would be a redundant dead end.
+        Screen::Checks if app.prepared_to_restart => {}
         Screen::Checks => {
-            if app.prepared_to_restart {
-                // The change is written; the only thing left is to restart. Offer a way back to
-                // the goals, but no apply button to press again.
-                push(
-                    ui,
-                    "Back to goals",
-                    Kind::Secondary,
-                    true,
-                    Action::Show(Screen::Home),
-                );
-            } else {
-                push(
-                    ui,
-                    "Apply and restart later",
-                    Kind::Primary,
-                    app.can_apply(),
-                    Action::Apply,
-                );
-                push(ui, "Check again", Kind::Secondary, true, Action::RunChecks);
-            }
+            push(
+                ui,
+                "Apply and restart later",
+                Kind::Primary,
+                app.can_apply(),
+                Action::Apply,
+            );
+            push(ui, "Check again", Kind::Secondary, true, Action::RunChecks);
         }
         Screen::Done => {
             push(
