@@ -27,3 +27,14 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# Restrict the address families the service and its disk-tool children may use: D-Bus is over
+# AF_UNIX, and blkid/lsblk/udev use AF_NETLINK. No network sockets are needed.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# Seccomp allow-list. @system-service is the standard service set; @mount is kept because the
+# helper mounts/unmounts filesystems for resize, and @obsolete is dropped. The filter is inherited
+# by the spawned disk tools (dumpe2fs, xfs_db, btrfs, blkid, lsblk, smartctl, mkfs, resize2fs), so
+# NOTE: this list may need widening if a tool trips an unexpected syscall at runtime — validate on
+# the box/VM before relying on it, and prefer widening the allow-list over removing the filter.
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@obsolete
+SystemCallErrorNumber=EPERM

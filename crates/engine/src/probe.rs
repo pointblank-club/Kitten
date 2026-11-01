@@ -68,7 +68,18 @@ fn measure(
             let Ok(summary) = ext4::summary(runner, device) else {
                 return (len, None);
             };
-            let used = to_sectors((summary.block_count - summary.free_blocks) * summary.block_size);
+            // Checked: block_count/free_blocks/block_size come from an untrusted superblock reached
+            // by the password-less inspect. parse_summary already rejects free_blocks > block_count,
+            // but guard the multiply too so a huge block_count cannot overflow and abort the daemon;
+            // fall back to "whole device used, no min" on anything implausible.
+            let Some(used_bytes) = summary
+                .block_count
+                .checked_sub(summary.free_blocks)
+                .and_then(|used_blocks| used_blocks.checked_mul(summary.block_size))
+            else {
+                return (len, None);
+            };
+            let used = to_sectors(used_bytes);
             let min = ext4::min_size(runner, device, summary.block_size)
                 .ok()
                 .map(to_sectors);

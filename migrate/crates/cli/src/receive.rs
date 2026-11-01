@@ -102,6 +102,16 @@ pub fn run(
                 }
                 match message {
                     Message::Hello { disk_len, .. } => {
+                        // Validate the source length against the real target before trusting it: it
+                        // later drives device_root (buffer/leaf allocation sized by source_len), so an
+                        // attacker-chosen huge disk_len would otherwise be a remote OOM/abort. The
+                        // source must also fit the target, or the migration cannot complete.
+                        if disk_len > data_len {
+                            anyhow::bail!(
+                                "the source claims {disk_len} bytes but the target is only {data_len}; \
+                                 refusing"
+                            );
+                        }
                         source_len = disk_len;
                         link.send(encode(
                             epoch,

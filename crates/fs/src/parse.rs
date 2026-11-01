@@ -4,19 +4,30 @@ use std::ops::Range;
 
 use crate::run::{CommandLine, RunError};
 
-/// The value after `name:` on the first line that starts with `name`, trimmed.
-pub(crate) fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    text.lines().find_map(|line| {
+/// The value after `name:` on the one line that starts with `name`, trimmed. Refuses when MORE than
+/// one line matches: an attacker-controlled string field in the tool output (an ext4 volume label or
+/// last-mounted path) can embed a newline to inject a second, fake `Key: value` line, so a
+/// security-critical read must treat a duplicate key as tampering rather than silently take the
+/// first. `Ok(None)` means the field is absent.
+pub(crate) fn field<'a>(text: &'a str, name: &str) -> Result<Option<&'a str>, String> {
+    let mut matches = text.lines().filter_map(|line| {
         line.strip_prefix(name)?
             .trim_start()
             .strip_prefix(':')
             .map(str::trim)
-    })
+    });
+    let first = matches.next();
+    if first.is_some() && matches.next().is_some() {
+        return Err(format!(
+            "ambiguous \"{name}\": more than one line matches (possible injected field)"
+        ));
+    }
+    Ok(first)
 }
 
 /// The leading number of a field's value, such as `4096` in `Cluster size : 4096 bytes`.
 pub(crate) fn number_field(text: &str, name: &str) -> Result<u64, String> {
-    field(text, name)
+    field(text, name)?
         .and_then(|value| value.split_whitespace().next())
         .and_then(|number| number.parse().ok())
         .ok_or_else(|| format!("missing or unreadable \"{name}\""))
@@ -65,7 +76,7 @@ mod tests {
     #[test]
     fn field_matches_the_whole_name() {
         let text = "Reserved block count: 5\nBlock count:   100\n";
-        assert_eq!(field(text, "Block count"), Some("100"));
+        assert_eq!(field(text, "Block count"), Ok(Some("100")));
     }
 
     #[test]
@@ -75,6 +86,15 @@ mod tests {
             Ok(4096)
         );
         assert!(number_field("Cluster size : big", "Cluster size").is_err());
+    }
+
+    #[test]
+    fn a_duplicated_key_is_refused_as_injection() {
+        // Simulates an ext4 volume label that embedded a newline to inject a fake "Block size:512"
+        // line ahead of the real one; a security-critical read must refuse, not take the first.
+        let text = "Filesystem volume name: evil\nBlock size:512\nBlock size:              4096\n";
+        assert!(field(text, "Block size").is_err());
+        assert!(number_field(text, "Block size").is_err());
     }
 
     #[test]

@@ -72,9 +72,9 @@ pub fn grow_online(runner: &dyn Runner, device: &Path) -> Result<(), RunError> {
 }
 
 pub fn parse_summary(text: &str) -> Result<Ext4Summary, String> {
-    let state = field(text, "Filesystem state").ok_or("missing \"Filesystem state\"")?;
-    let features = field(text, "Filesystem features").unwrap_or_default();
-    let error_count = match field(text, "FS Error count") {
+    let state = field(text, "Filesystem state")?.ok_or("missing \"Filesystem state\"")?;
+    let features = field(text, "Filesystem features")?.unwrap_or_default();
+    let error_count = match field(text, "FS Error count")? {
         Some(_) => number_field(text, "FS Error count")?,
         None => 0,
     };
@@ -84,10 +84,19 @@ pub fn parse_summary(text: &str) -> Result<Ext4Summary, String> {
         // zero multiplier), so the mover would skip live data. Refuse it like NTFS already does.
         return Err("block size is zero".to_string());
     }
+    let block_count = number_field(text, "Block count")?;
+    let free_blocks = number_field(text, "Free blocks")?;
+    if free_blocks > block_count {
+        // An impossible superblock; without this, used = block_count - free_blocks underflows
+        // (aborting under overflow-checks) in callers such as the inspect probe.
+        return Err(format!(
+            "{free_blocks} free blocks exceeds the {block_count}-block filesystem"
+        ));
+    }
     Ok(Ext4Summary {
         block_size,
-        block_count: number_field(text, "Block count")?,
-        free_blocks: number_field(text, "Free blocks")?,
+        block_count,
+        free_blocks,
         clean: state == "clean",
         needs_recovery: features.split_whitespace().any(|f| f == "needs_recovery"),
         error_count,
@@ -175,6 +184,24 @@ mod tests {
 
     const DUMPE2FS: &str = include_str!("../tests/fixtures/ext4/dumpe2fs.txt");
     const TUNE2FS: &str = include_str!("../tests/fixtures/ext4/tune2fs-l.txt");
+
+    #[test]
+    fn an_injected_block_size_line_is_refused() {
+        // A volume label that embedded a newline injects a fake "Block size:512" ahead of the real
+        // one. Taking the first would make used_ranges ~8x too small and silently skip live data, so
+        // the duplicate key must be refused.
+        let text = "Filesystem volume name: x\nBlock size:512\n\
+                    Filesystem state: clean\nBlock size:              4096\n\
+                    Block count:              102400\nFree blocks:              87129\n";
+        assert!(parse_summary(text).is_err());
+    }
+
+    #[test]
+    fn free_blocks_exceeding_block_count_is_refused() {
+        let text = "Filesystem state: clean\nBlock size: 4096\n\
+                    Block count: 100\nFree blocks: 200\n";
+        assert!(parse_summary(text).is_err());
+    }
 
     #[test]
     fn parses_the_superblock_summary() {
