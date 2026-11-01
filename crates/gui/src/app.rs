@@ -10,14 +10,12 @@ use eframe::egui;
 
 use crate::backend::{BackendError, Request, Response, Worker};
 use crate::editing;
-use crate::protocol::{CheckResult, DiskSummary, Planned, Probed, Reply};
-use crate::recovery_run::{Phase, RecoveryRun};
+use crate::protocol::{CheckResult, DiskSummary, FinishedRun, Planned, Probed, Reply};
 use crate::save::SaveDialog;
 use crate::shell;
 
 const PLAN_DELAY: f64 = 0.3;
 const CHECK_STEP: f64 = 0.11;
-const DONE_DELAY: f64 = 1.2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Screen {
@@ -26,7 +24,6 @@ pub enum Screen {
     Arrange,
     Plan,
     Checks,
-    Restart,
     Done,
     /// The migration goal's own screen, outside the partition flow.
     Migrate,
@@ -34,13 +31,10 @@ pub enum Screen {
 
 impl Screen {
     /// The flow's numbered steps, shown in the rail. `Home` is the launcher, not a step.
-    pub const ALL: [Screen; 5] = [
-        Screen::Arrange,
-        Screen::Plan,
-        Screen::Checks,
-        Screen::Restart,
-        Screen::Done,
-    ];
+    /// The move itself runs in the recovery system during the restart, on the machine's own
+    /// screen, so the app has no "restart" step: it goes straight from Checks to the finished
+    /// screen, which it reopens onto after the reboot.
+    pub const ALL: [Screen; 4] = [Screen::Arrange, Screen::Plan, Screen::Checks, Screen::Done];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -48,7 +42,6 @@ impl Screen {
             Screen::Arrange => "Arrange",
             Screen::Plan => "Plan",
             Screen::Checks => "Checks",
-            Screen::Restart => "Restart",
             Screen::Done => "Done",
             Screen::Migrate => "Migrate",
         }
@@ -143,8 +136,6 @@ pub enum Action {
     ToggleBackedUp,
     OpenSave,
     Apply,
-    PreviewRestart,
-    CutPower,
     PlanAnother,
     /// On the migration screen: freeze and commit the cutover.
     MigrateCutover,
@@ -187,6 +178,12 @@ pub struct App {
     pub check_problems: Vec<Refusal>,
     pub backed_up: bool,
     pending_apply: Option<u64>,
+    /// After a successful apply: the change is written and the computer needs restarting. The app
+    /// shows a short instruction and does not simulate the restart.
+    pub prepared_to_restart: bool,
+    /// The app reopened straight onto the finished screen because the helper reported a completed
+    /// run (set at startup), so probing the disk must not bounce it back to the launcher.
+    reopened: bool,
     pub screen: Screen,
     pub reached: Screen,
     /// The goal chosen on the home screen, if any.
@@ -199,8 +196,6 @@ pub struct App {
     pub goal_move_left: bool,
     pub screen_shown_at: f64,
     pub status: String,
-    pub run: Option<RecoveryRun>,
-    done_due: Option<f64>,
     pub outcome: Option<Outcome>,
     pub save: Option<SaveDialog>,
     /// The migration goal's own view and demo migration.
@@ -230,6 +225,8 @@ impl App {
             check_problems: Vec::new(),
             backed_up: false,
             pending_apply: None,
+            prepared_to_restart: false,
+            reopened: false,
             screen: Screen::Home,
             reached: Screen::Arrange,
             goal: None,
@@ -238,14 +235,15 @@ impl App {
             goal_move_left: true,
             screen_shown_at: 0.0,
             status: String::new(),
-            run: None,
-            done_due: None,
             outcome: None,
             save: None,
             migrate: crate::migrate::MigrateView::new(),
             now: 0.0,
         };
         app.worker.send(Request::ListDisks);
+        // Ask whether a run just finished: after the restart that applies a change, the recovery
+        // system leaves its outcome in the journal, and the app reopens onto the finished screen.
+        app.worker.send(Request::LastRun);
         // When the host demo runner launches the app to drive a real migration, open straight on
         // the migration screen instead of the goal launcher.
         if std::env::var_os("BOOTSHIFT_MIGRATE_DEMO").is_some() {
@@ -269,6 +267,7 @@ impl App {
         while let Some((id, response)) = self.worker.try_recv() {
             match response {
                 Response::Disks(reply) => self.on_disks(reply),
+                Response::LastRun(reply) => self.on_last_run(reply),
                 Response::Probed(reply) => self.on_probed(reply),
                 Response::Planned(reply) if self.pending_plan == Some(id) => self.on_planned(reply),
                 Response::Checked(reply) if self.pending_check == Some(id) => {
@@ -305,6 +304,22 @@ impl App {
         self.worker.send(Request::Probe { disk });
     }
 
+    /// A completed run reported by the helper (read from the journal after the restart): reopen
+    /// straight onto the finished screen with its numbers, instead of the goal launcher.
+    fn on_last_run(&mut self, reply: Result<Reply<Option<FinishedRun>>, BackendError>) {
+        if let Ok(Some(run)) = flatten(reply) {
+            self.outcome = Some(Outcome {
+                bytes: run.bytes,
+                chunks: run.chunks,
+                power_cuts: run.power_cuts,
+                seconds: run.seconds,
+            });
+            self.reopened = true;
+            self.show(Screen::Done);
+            self.status = "The change is done. Here is what Kitten moved.".to_string();
+        }
+    }
+
     fn on_probed(&mut self, reply: Result<Reply<Probed>, BackendError>) {
         match flatten(reply) {
             Ok(probed) => {
@@ -313,9 +328,15 @@ impl App {
                 self.reached = Screen::Arrange;
                 self.selected = None;
                 self.on_target_change(target);
-                // The disk is ready; wait on the home screen for the person to pick a goal.
-                self.show(Screen::Home);
-                self.status = "Pick what you'd like to do.".to_string();
+                if self.reopened {
+                    // A finished run is already on screen; keep it rather than bouncing to the
+                    // launcher. The probe still ran so the finished screen can draw the new layout.
+                    self.show(Screen::Done);
+                } else {
+                    // The disk is ready; wait on the home screen for the person to pick a goal.
+                    self.show(Screen::Home);
+                    self.status = "Pick what you'd like to do.".to_string();
+                }
             }
             Err(refusals) => {
                 self.disk_problems = refusals;
@@ -367,7 +388,14 @@ impl App {
     fn on_applied(&mut self, reply: Result<Reply<crate::protocol::Applied>, BackendError>) {
         self.pending_apply = None;
         match flatten(reply) {
-            Ok(_) => self.show_restart(),
+            // The change is written to the EFI partition and the next boot is pointed at the
+            // recovery system. There is nothing more to do in the app: the move happens during the
+            // restart, on the machine's own screen, and Kitten reopens onto the finished screen
+            // afterwards. Say so plainly; do not simulate the restart.
+            Ok(_) => {
+                self.prepared_to_restart = true;
+                self.status = "Changes prepared. Restart your computer to apply them.".to_string();
+            }
             Err(refusals) => {
                 self.check_problems = refusals;
                 self.status = "Nothing was changed.".to_string();
@@ -480,6 +508,7 @@ impl App {
         self.checks_finished = false;
         self.checks.clear();
         self.checks_started = None;
+        self.prepared_to_restart = false;
         self.reached = Screen::Arrange;
         self.plan_due = Some(self.now + PLAN_DELAY);
     }
@@ -579,53 +608,6 @@ impl App {
         self.pending_apply = Some(self.worker.send(Request::Apply { disk, target }));
     }
 
-    fn show_restart(&mut self) {
-        self.show(Screen::Restart);
-        // The simulation is a demo teaching aid; on a real disk the move runs in the recovery
-        // system on the machine's own screen, so there is nothing for the app to play.
-        if self.is_demo() {
-            let bytes = self.plan.as_ref().map_or(0, |p| p.copy_bytes);
-            self.run = Some(RecoveryRun::new(bytes.max(1)));
-            self.status =
-                "Demo: preview what the restart looks like, power cut included.".to_string();
-        } else {
-            self.run = None;
-            self.status = "Everything is ready. Restart the computer to begin.".to_string();
-        }
-    }
-
-    fn preview_restart(&mut self) {
-        let now = self.clock();
-        if let Some(run) = &mut self.run {
-            run.start(now);
-            self.status = "Copying. Pull the plug whenever you like.".to_string();
-        }
-    }
-
-    fn step_run(&mut self) {
-        let now = self.clock();
-        let Some(run) = &mut self.run else {
-            return;
-        };
-        let was_playing = run.is_playing();
-        run.advance(now);
-        if was_playing && run.phase == Phase::Finished && self.done_due.is_none() {
-            self.done_due = Some(self.now + DONE_DELAY);
-        }
-        if self.done_due.is_some_and(|due| self.now >= due) {
-            self.done_due = None;
-            if let Some(run) = &self.run {
-                self.outcome = Some(Outcome {
-                    bytes: run.total_bytes,
-                    chunks: run.total_chunks,
-                    power_cuts: run.power_cuts,
-                    seconds: run.seconds(),
-                });
-            }
-            self.show(Screen::Done);
-        }
-    }
-
     /// Removes a partition from the target, so the plan deletes it and frees its space.
     fn delete_partition(&mut self, guid: Guid) {
         let mut next = self.target.clone();
@@ -664,10 +646,6 @@ impl App {
         }
     }
 
-    fn clock(&self) -> Duration {
-        Duration::from_secs_f64(self.now.max(0.0))
-    }
-
     /* ---------- what the buttons allow ---------- */
 
     pub fn has_changes(&self) -> bool {
@@ -679,15 +657,11 @@ impl App {
     }
 
     pub fn can_apply(&self) -> bool {
-        self.plannable() && self.checks_passed && self.backed_up && self.pending_apply.is_none()
-    }
-
-    pub fn run_is_playing(&self) -> bool {
-        self.run.as_ref().is_some_and(RecoveryRun::is_playing)
-    }
-
-    pub fn run_is_ready(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| r.phase == Phase::Ready)
+        self.plannable()
+            && self.checks_passed
+            && self.backed_up
+            && self.pending_apply.is_none()
+            && !self.prepared_to_restart
     }
 
     fn act(&mut self, action: Action) {
@@ -724,13 +698,6 @@ impl App {
                 }
             }
             Action::Apply => self.apply(),
-            Action::PreviewRestart => self.preview_restart(),
-            Action::CutPower => {
-                let now = self.clock();
-                if let Some(run) = &mut self.run {
-                    run.cut_power(now);
-                }
-            }
             Action::PlanAnother => {
                 self.start_over();
                 self.show(Screen::Arrange);
@@ -747,14 +714,6 @@ impl App {
         }
         if self.checks_started.is_some() && !self.checks_finished {
             due.push(CHECK_STEP / 2.0);
-        }
-        if let Some(run) = &self.run {
-            if let Some(next) = run.next_change(self.clock()) {
-                due.push(next.as_secs_f64());
-            }
-        }
-        if let Some(at) = self.done_due {
-            due.push(at - self.now);
         }
         due.into_iter().map(|d| d.max(0.0)).reduce(f64::min)
     }
@@ -780,7 +739,6 @@ impl App {
             self.request_plan();
         }
         self.step_checks();
-        self.step_run();
         if self.screen == Screen::Migrate {
             self.migrate.tick(self.now);
             self.migrate.poll();

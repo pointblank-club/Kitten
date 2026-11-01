@@ -152,7 +152,6 @@ const SECONDARY_HOVER: Color32 = Color32::from_rgb(0x24, 0x24, 0x2b);
 pub enum Kind {
     Secondary,
     Primary,
-    Stop,
 }
 
 pub fn button(ui: &mut Ui, text: &str, kind: Kind, enabled: bool) -> Response {
@@ -179,12 +178,6 @@ pub fn button(ui: &mut Ui, text: &str, kind: Kind, enabled: bool) -> Response {
         (true, Kind::Primary) => (theme::SIGNAL, theme::SIGNAL, theme::SIGNAL_INK),
         (true, Kind::Secondary) if hover => (SECONDARY_HOVER, theme::RULE_HOVER, theme::INK),
         (true, Kind::Secondary) => (theme::DECK_HIGH, theme::RULE, theme::INK),
-        (true, Kind::Stop) if hover => (theme::alpha(theme::STOP, 0.10), theme::STOP, theme::STOP),
-        (true, Kind::Stop) => (
-            Color32::TRANSPARENT,
-            theme::alpha(theme::STOP, 0.45),
-            theme::STOP,
-        ),
     };
     let painter = ui.painter();
     let fill = animate_colour(ui, response.id.with("fill"), fill);

@@ -11,7 +11,6 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use crate::app::{App, Goal, Screen};
 use crate::backend::Worker;
 use crate::demo::{DemoBackend, demo_layout};
-use crate::recovery_run::Phase;
 
 const STEP: f32 = 0.05;
 const GIB: u64 = 2048 * 1024;
@@ -304,35 +303,48 @@ fn the_whole_demo_flow_runs_from_drag_to_done() {
     assert!(harness.state().can_apply());
     snapshot(&mut harness, "04-checks");
 
+    // Apply prepares the change for the restart; the move itself runs in the recovery system at
+    // boot, on the machine's own screen, so the app shows an instruction, not a simulation.
     harness.get_by_label("Apply and restart later").click();
     seconds(&mut harness, 0.3);
-    assert_eq!(harness.state().screen, Screen::Restart);
-    snapshot(&mut harness, "05-restart-ready");
-
-    harness.get_by_label("Preview the restart").click();
-    seconds(&mut harness, 4.0);
-    let reached = harness.state().run.as_ref().map_or(0, |run| run.chunk);
-    assert!(reached > 0);
-    snapshot(&mut harness, "06-restart-copying");
-
-    harness.get_by_label("Cut the power").click();
-    seconds(&mut harness, 2.5);
-    let run = harness.state().run.as_ref().expect("a run");
-    assert!(matches!(run.phase, Phase::PowerCut { lines: 3, .. }));
-    snapshot(&mut harness, "07-power-cut");
-    seconds(&mut harness, 1.0);
-    let run = harness.state().run.as_ref().expect("a run");
-    assert_eq!(run.phase, Phase::Copying);
-    assert!(run.chunk >= reached, "the run resumes, it never goes back");
-
-    seconds(&mut harness, 30.0);
     let app = harness.state();
-    assert_eq!(app.screen, Screen::Done);
-    let outcome = app.outcome.as_ref().expect("the done screen's numbers");
-    assert_eq!(outcome.power_cuts, 1);
+    assert!(
+        app.prepared_to_restart,
+        "apply prepares the change for the restart"
+    );
+    assert_eq!(app.screen, Screen::Checks);
+    assert_eq!(
+        app.status,
+        "Changes prepared. Restart your computer to apply them."
+    );
+    assert!(
+        !app.can_apply(),
+        "there is nothing left to apply once it is prepared"
+    );
+    snapshot(&mut harness, "05-prepared");
+}
+
+/// After the machine restarts and the move finishes, the helper reports the outcome and the app
+/// reopens straight onto the finished screen instead of the goal launcher.
+#[test]
+fn reopens_to_the_finished_screen_after_a_completed_run() {
+    let mut harness = Harness::builder()
+        .with_size(Vec2::new(1440.0, 900.0))
+        .with_step_dt(STEP)
+        .with_max_steps(2_000)
+        .build_ui_state(
+            |ui, app: &mut App| app.frame(ui),
+            App::new(Worker::inline(Box::new(DemoBackend::finished()))),
+        );
+    harness.run_steps(6);
+    let app = harness.state();
+    assert_eq!(app.screen, Screen::Done, "a finished run reopens onto Done");
+    let outcome = app.outcome.as_ref().expect("the finished run's numbers");
     assert_eq!(outcome.chunks, 1448);
+    assert_eq!(outcome.power_cuts, 1);
     snapshot(&mut harness, "08-done");
 
+    // From the finished screen, planning another change returns to the editor on the fresh disk.
     harness.get_by_label("Plan another change").click();
     seconds(&mut harness, 0.5);
     let app = harness.state();

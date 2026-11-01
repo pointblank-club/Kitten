@@ -221,7 +221,6 @@ pub mod size {
     pub const BUTTON: f32 = 13.0;
     pub const DATA: f32 = 11.5;
     pub const STAT: f32 = 22.5;
-    pub const CONSOLE: f32 = 15.0;
 }
 
 pub mod layout {
@@ -232,7 +231,6 @@ pub mod layout {
     /// Below this the rail becomes a strip across the top.
     pub const NARROW_BELOW: f32 = 820.0;
     pub const LEDE_MAX: f32 = 660.0;
-    pub const CONSOLE_MAX: f32 = 870.0;
 }
 
 /// egui's own widgets in the app's colours, for the few places they show (the disk picker).

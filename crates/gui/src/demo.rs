@@ -6,7 +6,7 @@ use bootshift_core::plan::Operation;
 use bootshift_core::units::{Lba, Sectors};
 
 use crate::backend::{Backend, BackendError};
-use crate::protocol::{Applied, CheckResult, DiskSummary, Planned, Probed, Reply};
+use crate::protocol::{Applied, CheckResult, DiskSummary, FinishedRun, Planned, Probed, Reply};
 
 const MIB: u64 = 2048;
 const GIB: u64 = 1024 * MIB;
@@ -15,13 +15,37 @@ pub const DISK_PATH: &str = "/dev/demo";
 
 pub struct DemoBackend {
     layout: Layout,
+    /// A finished run to reopen onto, as the helper would report after a real restart. Set from
+    /// `BOOTSHIFT_DONE_DEMO` so the finished screen can be demoed without hardware.
+    finished: Option<FinishedRun>,
 }
 
 impl DemoBackend {
     pub fn new() -> Self {
         Self {
             layout: demo_layout(),
+            finished: std::env::var_os("BOOTSHIFT_DONE_DEMO").map(|_| demo_finished_run()),
         }
+    }
+
+    /// A demo backend that reports a completed run, so the app reopens straight onto the finished
+    /// screen (what happens after the machine restarts and the move is done).
+    #[cfg(test)]
+    pub fn finished() -> Self {
+        Self {
+            layout: demo_layout(),
+            finished: Some(demo_finished_run()),
+        }
+    }
+}
+
+/// The canned numbers the finished screen shows in the demo: a 90 GiB move in 1448 chunks.
+fn demo_finished_run() -> FinishedRun {
+    FinishedRun {
+        bytes: 90 << 30,
+        chunks: 1448,
+        power_cuts: 1,
+        seconds: 214,
     }
 }
 
@@ -71,8 +95,8 @@ impl Backend for DemoBackend {
         })
     }
 
-    // The pretend checks pass and apply "succeeds", so the whole flow can be walked through,
-    // restart screen included. The rail says it's demo data throughout.
+    // The pretend checks pass and apply "succeeds", so the whole flow can be walked through up to
+    // the restart. The rail says it's demo data throughout.
     fn check(
         &mut self,
         _disk: &str,
@@ -88,6 +112,12 @@ impl Backend for DemoBackend {
             value: Applied {
                 restart_to_begin: true,
             },
+        })
+    }
+
+    fn last_run(&mut self) -> Result<Reply<Option<FinishedRun>>, BackendError> {
+        Ok(Reply::Ok {
+            value: self.finished.clone(),
         })
     }
 }

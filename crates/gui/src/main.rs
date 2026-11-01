@@ -4,7 +4,6 @@
 
 mod app;
 mod backend;
-mod console;
 mod demo;
 mod disk_bar;
 mod editing;
@@ -15,7 +14,6 @@ mod migrate;
 mod motion;
 mod protocol;
 mod readout;
-mod recovery_run;
 mod save;
 mod screens;
 mod shell;

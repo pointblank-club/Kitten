@@ -197,27 +197,48 @@ fn rail_strip(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
     });
 }
 
-/// A platter with one sector lit, then the word mark.
+/// Decodes the bundled Kitten logo once and caches the uploaded texture in egui memory, so
+/// `brand` can paint it every frame without re-decoding.
+fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::NULL.with("kitten-logo");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return tex;
+    }
+    // The logo is bundled at build time, so decoding should never fail; if it somehow did, fall
+    // back to a blank pixel rather than panicking.
+    let color = match image::load_from_memory(include_bytes!("../../../assets/logo.png")) {
+        Ok(decoded) => {
+            let rgba = decoded.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
+        }
+        Err(_) => egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0]),
+    };
+    let tex = ctx.load_texture("kitten-logo", color, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
+}
+
+/// The Kitten logo as a small app-icon tile, then the word mark.
 fn brand(ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 9.0;
-        let (mark, _) = ui.allocate_exact_size(Vec2::splat(17.0), Sense::hover());
-        let painter = ui.painter();
-        painter.circle_filled(mark.center(), 8.5, theme::VOID);
-        painter.circle_stroke(mark.center(), 7.75, Stroke::new(1.5, theme::RULE_HOVER));
-        painter.circle_filled(
-            Pos2::new(mark.right() - 1.5 - 1.5 - 2.0, mark.center().y),
-            2.0,
-            theme::SIGNAL,
+        let tex = logo_texture(ui.ctx());
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+        ui.painter().image(
+            tex.id(),
+            mark,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
         );
 
         let mut job = egui::text::LayoutJob::default();
-        let mut boot = widgets::format(Face::Sans(Weight::Medium), 15.3, theme::DIM);
-        boot.extra_letter_spacing = -0.23;
-        let mut shift = widgets::format(Face::Sans(Weight::Bold), 15.3, theme::INK);
-        shift.extra_letter_spacing = -0.23;
-        job.append("Boot", 0.0, boot);
-        job.append("Shift", 0.0, shift);
+        let mut kit = widgets::format(Face::Sans(Weight::Medium), 15.3, theme::DIM);
+        kit.extra_letter_spacing = -0.23;
+        let mut ten = widgets::format(Face::Sans(Weight::Bold), 15.3, theme::INK);
+        ten.extra_letter_spacing = -0.23;
+        job.append("Kit", 0.0, kit);
+        job.append("ten", 0.0, ten);
         let galley = ui.painter().layout_job(job);
         widgets::show_galley(ui, galley);
     });
@@ -596,31 +617,25 @@ fn buttons(ui: &mut Ui, app: &App, actions: &mut Vec<Action>) {
             );
         }
         Screen::Checks => {
-            push(
-                ui,
-                "Apply and restart later",
-                Kind::Primary,
-                app.can_apply(),
-                Action::Apply,
-            );
-            push(ui, "Check again", Kind::Secondary, true, Action::RunChecks);
-        }
-        Screen::Restart => {
-            if app.is_demo() && app.run_is_ready() {
+            if app.prepared_to_restart {
+                // The change is written; the only thing left is to restart. Offer a way back to
+                // the goals, but no apply button to press again.
                 push(
                     ui,
-                    "Preview the restart",
-                    Kind::Primary,
+                    "Back to goals",
+                    Kind::Secondary,
                     true,
-                    Action::PreviewRestart,
+                    Action::Show(Screen::Home),
                 );
-            }
-            if app.run_is_playing() {
-                let copying = app
-                    .run
-                    .as_ref()
-                    .is_some_and(|r| r.phase == crate::recovery_run::Phase::Copying);
-                push(ui, "Cut the power", Kind::Stop, copying, Action::CutPower);
+            } else {
+                push(
+                    ui,
+                    "Apply and restart later",
+                    Kind::Primary,
+                    app.can_apply(),
+                    Action::Apply,
+                );
+                push(ui, "Check again", Kind::Secondary, true, Action::RunChecks);
             }
         }
         Screen::Done => {

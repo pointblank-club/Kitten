@@ -410,6 +410,7 @@ dependencies = [
  "bootshift-migrate-core",
  "eframe",
  "egui_kittest",
+ "image",
  "proptest",
  "serde",
  "serde_json",

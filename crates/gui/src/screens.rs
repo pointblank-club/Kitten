@@ -14,7 +14,7 @@ use crate::disk_bar::DiskBar;
 use crate::grid::{self, Column};
 use crate::theme::{self, Face, Weight, layout, size};
 use crate::widgets::{self, Kind};
-use crate::{console, gutter, shell, table};
+use crate::{gutter, shell, table};
 
 pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, narrow: bool) {
     ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -23,7 +23,6 @@ pub fn show(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, narrow: bool) {
         Screen::Arrange => arrange(ui, app, actions, narrow),
         Screen::Plan => plan(ui, app, narrow),
         Screen::Checks => checks(ui, app, actions, narrow),
-        Screen::Restart => restart(ui, app, narrow),
         Screen::Done => done(ui, app, narrow),
         Screen::Migrate => {}
     }
@@ -264,7 +263,33 @@ fn checks(ui: &mut Ui, app: &App, actions: &mut Vec<Action>, narrow: bool) {
         widgets::refusals(ui, &app.check_problems);
     }
     ui.add_space(15.0);
-    widgets::panel(ui, Margin::symmetric(15, 13), |ui| gate(ui, app, actions));
+    if app.prepared_to_restart {
+        prepared_panel(ui);
+    } else {
+        widgets::panel(ui, Margin::symmetric(15, 13), |ui| gate(ui, app, actions));
+    }
+}
+
+/// Shown once the change is applied: the work now happens during the restart, outside the app.
+/// No simulated console; the real move appears on the machine's own screen at boot.
+fn prepared_panel(ui: &mut Ui) {
+    widgets::panel(ui, Margin::symmetric(19, 17), |ui| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        bar_caption(ui, "Changes prepared", "restart to apply");
+        ui.add_space(10.0);
+        let width = ui.available_width().min(layout::LEDE_MAX);
+        widgets::paragraph(
+            ui,
+            "Restart this computer to apply the change. The move runs in Kitten's recovery system \
+             before any operating system starts, on the machine's own screen, not in this window. \
+             If the power goes out, just turn the computer back on and it resumes from the journal \
+             by itself. Kitten reopens here when it's done.",
+            size::LEDE,
+            theme::DIM,
+            width,
+            1.5,
+        );
+    });
 }
 
 /// The backup checkbox on the left and the save button on the right, stacked when the two
@@ -1027,44 +1052,6 @@ fn cleanup_row(ui: &mut Ui, app: &App, partition: &Partition, actions: &mut Vec<
         }
     }
     ui.add_space(8.0);
-}
-
-/* ---------- restart ---------- */
-
-fn restart(ui: &mut Ui, app: &App, narrow: bool) {
-    if app.is_demo() {
-        header(
-            ui,
-            "During the restart",
-            "This is what the computer shows while Kitten works, before any operating system starts.",
-            narrow,
-        );
-        if let Some(run) = &app.run {
-            console::show(ui, run);
-        }
-        return;
-    }
-
-    // Real disk: the move happens in the recovery system on the next boot, on the machine's own
-    // screen, not here. Say so plainly and show what that screen will look like.
-    header(
-        ui,
-        "Ready to restart",
-        "Everything is prepared. Restart this computer to apply the change.",
-        narrow,
-    );
-    let width = ui.available_width().min(layout::LEDE_MAX);
-    widgets::paragraph(
-        ui,
-        "The move runs in Kitten's recovery system, before any operating system starts, so it \
-         appears on the machine's own screen, not in this window. If the power goes out, just turn \
-         the computer back on; it resumes from the journal by itself. Reopen Kitten afterwards \
-         to see the new layout.",
-        size::LEDE,
-        theme::DIM,
-        width,
-        1.5,
-    );
 }
 
 /* ---------- done ---------- */
