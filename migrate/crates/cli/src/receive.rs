@@ -57,6 +57,10 @@ pub fn run(
     let mut batch: Vec<IncomingChunk> = Vec::new();
     let mut batch_bytes = 0usize;
     let mut source_len = data_len;
+    // Whether a FinalRoot has proved the whole target byte-equal to the source. The commit is only
+    // accepted once this is true, so a sender cannot declare success with a bare Committed frame
+    // (which would skip the end-to-end check and hide any coverage gap).
+    let mut verified = false;
     loop {
         match link.recv() {
             Ok(Some(frame)) => {
@@ -148,6 +152,7 @@ pub fn run(
                         );
                         receipt.sign_with_seed(&RECEIVER_KEY_SEED);
                         let matched = receipt.roots_match();
+                        verified = matched;
                         if let Some(path) = receipt_out {
                             let json = serde_json::to_vec_pretty(&receipt)
                                 .context("serialising the receipt")?;
@@ -163,6 +168,14 @@ pub fn run(
                         );
                     }
                     Message::Committed { .. } => {
+                        // Refuse a commit that was not preceded by a matching FinalRoot: the target
+                        // has not been proved equal to the source, so success would be a false claim.
+                        if !verified {
+                            anyhow::bail!(
+                                "the source sent a commit without a verified final root; refusing \
+                                 to report success (the target was not proved equal to the source)"
+                            );
+                        }
                         println!("receive: source committed; the target is written and verified");
                         return Ok(());
                     }
