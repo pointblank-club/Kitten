@@ -61,8 +61,10 @@ scripts:
   postinstall: packaging/scripts/reload-services.sh
   postremove: packaging/scripts/reload-services.sh
 
-# Every tool in boot::initramfs::REQUIRED_TOOLS is a hard dependency, so a missing one can never
-# surface as a refusal halfway through a plan. Package names differ between the two families.
+# Every tool the recovery system can call is a hard dependency, including the Btrfs and XFS ones
+# that boot::initramfs::OPTIONAL_TOOLS skips when absent: preflight allows a Btrfs or XFS resize
+# without checking for them, so a missing tool would only show up after the restart, mid-plan.
+# Package names differ between the two families.
 overrides:
   deb:
     depends:
@@ -75,15 +77,14 @@ overrides:
       - kmod
       - zstd
       - smartmontools
+      - btrfs-progs
+      - xfsprogs
       - dbus
       - polkitd | policykit-1
       - systemd
       - libgl1
       - libegl1
       - libxkbcommon0
-    recommends:
-      - btrfs-progs
-      - xfsprogs
   rpm:
     depends:
       - e2fsprogs
@@ -93,12 +94,11 @@ overrides:
       - kmod
       - zstd
       - smartmontools
+      - btrfs-progs
+      - xfsprogs
       - dbus
       - polkit
       - systemd
       - mesa-libGL
       - mesa-libEGL
       - libxkbcommon
-    recommends:
-      - btrfs-progs
-      - xfsprogs

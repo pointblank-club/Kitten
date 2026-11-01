@@ -24,6 +24,13 @@ it. Remove an issue in the same change that fixes it.
   passes, while the GUI's contract is one row per check. The app then shows no rows and keeps
   apply locked, which is safe but means apply can never be reached against the real helper.
   `Check` should return the rows from `engine::preflight::evaluate`. Task 13.6.
+- **I-34 Preflight doesn't check for the Btrfs and XFS tools.** `unavailable_operations`
+  allows a Btrfs shrink or grow and an XFS grow by filesystem alone, while `btrfs`,
+  `xfs_growfs` and `xfs_repair` are `OPTIONAL_TOOLS` that the initramfs skips when missing. On a
+  system without them the resize passes Apply and fails after the restart; the journal keeps
+  the data safe, but the user has to recover. The `.deb` and `.rpm` depend on both packages, so
+  this only bites the CLI tarball and source builds. Preflight should refuse when a planned
+  operation's tool is missing. Task 9.1.
 - **I-08 systemd-boot is not supported yet**, though section 0 scopes it in (without Secure
   Boot). Preflight refuses it. Task 10.5.
 ## Paper cuts
@@ -33,7 +40,9 @@ it. Remove an issue in the same change that fixes it.
 - **I-14 The GUI stops at "restart later".** The restart screen and post-restart summary now
   exist in the frontend with a demo simulation, but nothing reads the real journal for the
   summary, and the table-backup download is missing. Tasks 13.3, 13.4.
-- **I-15 No packages, no `docs/design.md`, no demo script.** Tasks 14.2, 14.3, 14.4.
+- **I-15 The packages are untested, and there is no `docs/design.md` or demo recording.**
+  `release.yml` builds a `.deb` and `.rpm`, but neither has been installed on a fresh system
+  yet. Tasks 14.2, 14.3, 14.4.
 
 ## Fixed
 
