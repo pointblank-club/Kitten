@@ -77,8 +77,16 @@ impl Applier {
     ) -> Result<Self, StoreError> {
         let mut applier = Applier::new(run_id, epoch, layout, target_len);
         if let Some(slot) = store.read_newest()? {
-            applier.acked = slot.acked_seq;
+            // Always continue the journal slot numbering past the newest slot so our commits win.
             applier.slot_seq = slot.seq.saturating_add(1);
+            // Only inherit the acknowledgement watermark if the slot belongs to THIS run. A reused
+            // scratch device can hold a previous run's slot; trusting its watermark would make us
+            // skip writing this run's chunks and silently leave stale data on the target. On a
+            // mismatch, start from zero and re-apply everything.
+            // NOTE: needs the two-VM migrate-rig to validate the reused-scratch path end to end.
+            if slot.run_id == run_id && slot.epoch.0 == epoch.0 {
+                applier.acked = slot.acked_seq;
+            }
         }
         Ok(applier)
     }
@@ -294,6 +302,54 @@ mod tests {
                 .expect("apply");
         }
         assert_eq!(target.bytes(), source.bytes());
+    }
+
+    #[test]
+    fn resume_ignores_a_journal_slot_from_a_different_run() {
+        let source = source();
+        let mut target = MemDisk::zeroed(SRC_LEN as usize, 4096).expect("target");
+        let mut scratch = MemDisk::zeroed(32 << 20, 4096).expect("scratch");
+
+        // Run 1 applies and commits slots on this scratch device.
+        let mut applier = Applier::new(1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN);
+        for batch in batches(&source, 256 * 1024, 2).iter().take(2) {
+            let mut store = Store::new(&mut scratch);
+            applier
+                .apply_batch(&mut store, &mut target, batch)
+                .expect("apply");
+        }
+        assert!(applier.acked().0 > 0, "run 1 should have advanced its ack");
+
+        // A new run reuses the same scratch device. It must NOT inherit run 1's watermark, or it
+        // would skip writing its own chunks and leave stale data on the target.
+        let store = Store::new(&mut scratch);
+        let resumed_other = Applier::resume(&store, 2, Epoch(7), identity_layout(SRC_LEN), SRC_LEN)
+            .expect("resume other run");
+        assert_eq!(
+            resumed_other.acked(),
+            FrameSeq(0),
+            "a different run_id must start from zero"
+        );
+
+        // A different epoch is likewise not resumed.
+        let store = Store::new(&mut scratch);
+        let resumed_epoch =
+            Applier::resume(&store, 1, Epoch(99), identity_layout(SRC_LEN), SRC_LEN)
+                .expect("resume other epoch");
+        assert_eq!(
+            resumed_epoch.acked(),
+            FrameSeq(0),
+            "a different epoch must start from zero"
+        );
+
+        // The matching run resumes as before.
+        let store = Store::new(&mut scratch);
+        let resumed_same = Applier::resume(&store, 1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN)
+            .expect("resume same run");
+        assert!(
+            resumed_same.acked().0 > 0,
+            "the same run_id/epoch must resume its watermark"
+        );
     }
 
     /// Individual single-chunk "batches" of the source, numbered from 1.

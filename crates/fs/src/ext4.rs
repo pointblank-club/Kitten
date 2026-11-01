@@ -110,7 +110,23 @@ pub fn parse_used_ranges(dumpe2fs: &str) -> Result<Vec<Range<u64>>, String> {
         }
     }
 
-    let free_count: u64 = free.iter().map(|r| r.end - r.start).sum();
+    // Reject any free range that runs past the filesystem. `complement` clamps out-of-range ranges,
+    // which would relocate coverage and could drop a real used block from the result (skipped data);
+    // mirror the xfs bound and refuse instead. (parse_block_range already guarantees start < end.)
+    for r in &free {
+        if r.end > summary.block_count {
+            return Err(format!(
+                "a free block range ends at {} past the {}-block filesystem",
+                r.end, summary.block_count
+            ));
+        }
+    }
+    // Checked sum: the ranges come from untrusted dumpe2fs output, so a crafted list must produce a
+    // clean error rather than overflow and abort before the consistency comparison below.
+    let free_count = free.iter().try_fold(0u64, |acc, r| {
+        acc.checked_add(r.end - r.start)
+            .ok_or_else(|| "free block counts overflow a 64-bit total".to_string())
+    })?;
     if free_count != summary.free_blocks {
         return Err(format!(
             "groups list {free_count} free blocks but the superblock says {}",

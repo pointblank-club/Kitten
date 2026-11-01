@@ -133,4 +133,32 @@ mod tests {
         let other_root = device_root(&other, len).expect("tampered root");
         assert_ne!(source_root, other_root, "a tampered target must differ");
     }
+
+    #[test]
+    fn device_root_over_the_source_range_matches_a_larger_target() {
+        // MIG-01: the receiver must hash the target over exactly the source length, not the whole
+        // (possibly larger) target device, or a larger target would never verify.
+        let src_len = 2 * RECEIPT_CHUNK;
+        let bytes: Vec<u8> = (0..src_len).map(|i| (i % 251) as u8).collect();
+        let source = MemDisk::from_bytes(bytes.clone(), 4096).expect("source");
+
+        // A larger target: identical over [0, src_len), with an extra nonzero tail.
+        let mut target_bytes = bytes;
+        target_bytes.resize((src_len + RECEIPT_CHUNK) as usize, 0xab);
+        let target = MemDisk::from_bytes(target_bytes, 4096).expect("target");
+
+        let source_root = device_root(&source, src_len).expect("source root");
+        let over_source = device_root(&target, src_len).expect("target root over source range");
+        assert_eq!(
+            source_root, over_source,
+            "a larger target must verify over the source range"
+        );
+
+        // Hashing the whole larger target is the regression: it would never match.
+        let over_whole = device_root(&target, target.len_bytes()).expect("full target root");
+        assert_ne!(
+            source_root, over_whole,
+            "hashing the whole larger target is the false negative we fixed"
+        );
+    }
 }

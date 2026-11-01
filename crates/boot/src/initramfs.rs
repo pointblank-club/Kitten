@@ -160,15 +160,23 @@ pub fn shared_libraries(runner: &dyn Runner, binary: &Path) -> Result<Vec<PathBu
     if output.status == Some(0) {
         return Ok(parse_ldd(&output.text()));
     }
-    let text = output.text();
-    if text.contains("not a dynamic executable") || text.contains("statically linked") {
+    // ldd prints "not a dynamic executable" to STDERR (and some builds "statically linked" to
+    // stdout), so check both streams. Only that marker means "static" (no libraries); any other
+    // non-zero exit (ldd missing, wrong architecture, unreadable) is ambiguous and fails closed,
+    // rather than being mistaken for a static binary and dropping its libraries from the image.
+    let stdout = output.text();
+    let is_static = ["not a dynamic executable", "statically linked"]
+        .iter()
+        .any(|&marker| stdout.contains(marker) || output.stderr.contains(marker));
+    if is_static {
         return Ok(Vec::new());
     }
     Err(RunError::UnexpectedOutput {
         command: command.to_string(),
         detail: format!(
-            "ldd failed and did not report a static binary: {}",
-            text.trim()
+            "ldd failed and did not report a static binary: {} {}",
+            stdout.trim(),
+            output.stderr.trim()
         ),
     })
 }
@@ -309,7 +317,8 @@ mod tests {
     #[test]
     fn a_static_binary_is_reported_as_having_no_libraries() {
         use bootshift_fs::run::ScriptedRunner;
-        let runner = ScriptedRunner::new().reply(1, "\tnot a dynamic executable\n");
+        // ldd prints the "not a dynamic executable" marker to stderr with a non-zero exit.
+        let runner = ScriptedRunner::new().reply_error(1, "\tnot a dynamic executable\n");
         assert_eq!(
             shared_libraries(&runner, Path::new("/usr/libexec/bootshift/bootshift")).ok(),
             Some(Vec::<PathBuf>::new()),

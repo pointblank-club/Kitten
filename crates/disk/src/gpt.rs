@@ -112,21 +112,32 @@ impl GptImage {
 
     pub fn entries(&self) -> Result<Vec<GptEntry>, GptError> {
         let gpt = self.parse()?;
-        Ok(gpt
-            .iter()
+        let total_sectors = self.disk_len / self.sector_size;
+        gpt.iter()
             .filter(|(_, entry)| entry.is_used())
-            .map(|(number, entry)| GptEntry {
-                number,
-                type_guid: Guid(entry.partition_type_guid),
-                unique_guid: Guid(entry.unique_partition_guid),
-                name: entry.partition_name.as_str().to_string(),
-                attributes: entry.attribute_bits,
-                extent: Extent::new(
-                    Lba(entry.starting_lba),
-                    Sectors(entry.ending_lba.saturating_sub(entry.starting_lba) + 1),
-                ),
+            .map(|(number, entry)| {
+                // The LBAs come straight from the on-disk table, which gptman does not bound on
+                // read. This is reached by the password-less inspect and the PID-1 recovery path, so
+                // refuse a reversed or out-of-range entry rather than letting the length arithmetic
+                // wrap (and abort under release overflow-checks).
+                if entry.ending_lba < entry.starting_lba || entry.ending_lba >= total_sectors {
+                    return Err(GptError::BadGeometry);
+                }
+                let sectors = entry
+                    .ending_lba
+                    .checked_sub(entry.starting_lba)
+                    .and_then(|span| span.checked_add(1))
+                    .ok_or(GptError::BadGeometry)?;
+                Ok(GptEntry {
+                    number,
+                    type_guid: Guid(entry.partition_type_guid),
+                    unique_guid: Guid(entry.unique_partition_guid),
+                    name: entry.partition_name.as_str().to_string(),
+                    attributes: entry.attribute_bits,
+                    extent: Extent::new(Lba(entry.starting_lba), Sectors(sectors)),
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// The table with each partition at its extent in `partitions`.

@@ -111,6 +111,16 @@ fn apply(
     target: &str,
     recovery_binary: &Path,
 ) -> Result<responses::Applied, ServiceError> {
+    // Serialize applies. zbus dispatches method calls concurrently and `run_blocking` offloads each
+    // to a thread, so two overlapping applies would otherwise race on shared ESP state (journal.bin,
+    // initrd.img, recovery-args.txt, the GRUB redirect, and the non-atomic global EFI BootOrder
+    // read-modify-write). Hold this lock for the whole apply; inspect/probe/check stay concurrent.
+    // Acquired on the blocking thread (never across an await), so a std mutex is correct here.
+    static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = APPLY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let inspected = service::inspect(&SystemRunner, Path::new(disk))?;
     let plan = service::plan_target(&inspected.layout, &responses::parse_target(target)?)?;
     // Unique per call: a fixed name would collide across concurrent applies and leave a
