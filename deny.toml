@@ -31,9 +31,45 @@ exceptions = [
 ]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = true
+# Crates that appear at more than one version because independent transitive dependencies pin
+# different majors. We do not pull any of these in directly and cannot unify them without forking
+# upstream crates, so they are skipped from the duplicate check; the gate still fails on any NEW
+# duplicate outside this list. The set is the complete list of multi-version crates in Cargo.lock
+# (platform shims such as objc2*/block2/windows-sys that only duplicate off-Linux are included so
+# the check is stable across targets). Revisit when dependencies are upgraded.
+skip = [
+    "bit-set",
+    "bit-vec",
+    "bitflags",
+    "block2",
+    "cpufeatures",
+    "embedded-io",
+    "foldhash",
+    "getrandom",
+    "hashbrown",
+    "jni-sys",
+    "linux-raw-sys",
+    "miniz_oxide",
+    "objc2",
+    "objc2-app-kit",
+    "objc2-foundation",
+    "objc2-metal",
+    "objc2-quartz-core",
+    "objc2-ui-kit",
+    "quick-error",
+    "r-efi",
+    "rand_core",
+    "redox_syscall",
+    "rustc-hash",
+    "rustix",
+    "syn",
+    "thiserror",
+    "thiserror-impl",
+    "windows-sys",
+]
 
 [sources]
 unknown-registry = "deny"

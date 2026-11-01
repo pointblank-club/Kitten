@@ -16,7 +16,12 @@ use crate::mirror;
 /// and a `snapshot` backed by `cow`. The frozen, writable view appears at `/dev/mapper/<name>-snap`;
 /// the applier keeps replicating through `/dev/mapper/<name>-origin`. With `export`, the snapshot is
 /// also offered over nvme-tcp so another machine can boot it.
-pub fn start(data: &str, cow: &str, name: &str, export: Option<(&str, u16, &str)>) -> Result<()> {
+pub fn start(
+    data: &str,
+    cow: &str,
+    name: &str,
+    export: Option<(&str, u16, &str, Option<&str>)>,
+) -> Result<()> {
     let sectors = device_sectors(data)?;
     create(
         &format!("{name}-origin"),
@@ -29,8 +34,8 @@ pub fn start(data: &str, cow: &str, name: &str, export: Option<(&str, u16, &str)
     let snap = format!("/dev/mapper/{name}-snap");
     println!("rehearse: snapshot ready at {snap}");
     println!("rehearse: replication continues through /dev/mapper/{name}-origin");
-    if let Some((listen, port, nqn)) = export {
-        mirror::export(&snap, listen, port, nqn)?;
+    if let Some((listen, port, nqn, host_nqn)) = export {
+        mirror::export(&snap, listen, port, nqn, host_nqn)?;
     }
     Ok(())
 }

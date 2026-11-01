@@ -148,12 +148,45 @@ pub fn find_program(name: &str, search_path: &[PathBuf]) -> Option<PathBuf> {
 
 /// The shared libraries `binary` loads, including the dynamic loader. Empty for static
 /// binaries.
+///
+/// A non-zero `ldd` exit is only taken to mean "static" when `ldd` actually says so
+/// ("not a dynamic executable" / "statically linked"). Any other failure (ldd missing, a
+/// wrong-architecture or unreadable binary) is ambiguous and fails closed with an error, rather
+/// than being mistaken for a static binary — otherwise a dynamic init or tool could slip into the
+/// recovery image with its libraries silently dropped, and fail to exec at boot.
 pub fn shared_libraries(runner: &dyn Runner, binary: &Path) -> Result<Vec<PathBuf>, RunError> {
-    let output = runner.run(&CommandLine::new("ldd").path(binary))?;
-    if output.status != Some(0) {
+    let command = CommandLine::new("ldd").path(binary);
+    let output = runner.run(&command)?;
+    if output.status == Some(0) {
+        return Ok(parse_ldd(&output.text()));
+    }
+    // ldd prints "not a dynamic executable" to STDERR (and some builds "statically linked" to
+    // stdout), so check both streams. Only that marker means "static" (no libraries); any other
+    // non-zero exit (ldd missing, wrong architecture, unreadable) is ambiguous and fails closed,
+    // rather than being mistaken for a static binary and dropping its libraries from the image.
+    let stdout = output.text();
+    // Markers that mean "this binary is static, so it loads no shared libraries". The first two are
+    // glibc's ldd; "Not a valid dynamic program" is musl's. On any other message we fall through and
+    // fail closed below (refuse to build the image) rather than guess — that is a build-time refusal
+    // with no data risk, never a silently dynamic binary. Add a marker here if another libc differs.
+    let is_static = [
+        "not a dynamic executable",
+        "statically linked",
+        "Not a valid dynamic program",
+    ]
+    .iter()
+    .any(|&marker| stdout.contains(marker) || output.stderr.contains(marker));
+    if is_static {
         return Ok(Vec::new());
     }
-    Ok(parse_ldd(&output.text()))
+    Err(RunError::UnexpectedOutput {
+        command: command.to_string(),
+        detail: format!(
+            "ldd failed and did not report a static binary: {} {}",
+            stdout.trim(),
+            output.stderr.trim()
+        ),
+    })
 }
 
 pub fn parse_ldd(text: &str) -> Vec<PathBuf> {
@@ -287,6 +320,26 @@ mod tests {
                 PathBuf::from("/lib64/ld-linux-x86-64.so.2"),
             ]
         );
+    }
+
+    #[test]
+    fn a_static_binary_is_reported_as_having_no_libraries() {
+        use bootshift_fs::run::ScriptedRunner;
+        // ldd prints the "not a dynamic executable" marker to stderr with a non-zero exit.
+        let runner = ScriptedRunner::new().reply_error(1, "\tnot a dynamic executable\n");
+        assert_eq!(
+            shared_libraries(&runner, Path::new("/usr/libexec/bootshift/bootshift")).ok(),
+            Some(Vec::<PathBuf>::new()),
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_ldd_failure_fails_closed() {
+        use bootshift_fs::run::ScriptedRunner;
+        // ldd missing / wrong arch: no "not a dynamic executable" marker, so it must error rather
+        // than be mistaken for a static binary.
+        let runner = ScriptedRunner::new().reply_error(127, "ldd: command not found");
+        assert!(shared_libraries(&runner, Path::new("/usr/libexec/bootshift/bootshift")).is_err());
     }
 
     #[test]

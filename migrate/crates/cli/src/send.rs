@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use bootshift_disk::{Access, BlockDevice};
 use bootshift_migrate_core::{
-    Codec, DiskRange, Epoch, FrameSeq, Message, PROTOCOL_VERSION, PassKind, Role, decode, encode,
+    Codec, DiskRange, Epoch, FrameSeq, Message, PROTOCOL_VERSION, PassKind, Receipt, Role, decode,
+    encode,
 };
 use bootshift_migrate_net::{Link, LinkError, TcpLink};
 
-use crate::common::{open_device, recv_message};
+use crate::common::{device_root, open_device, recv_message};
 
 const CHUNK: u64 = 1 << 20;
 /// Stop framing new chunks while this many bytes are still queued, so a slow receiver bounds the
@@ -97,6 +98,23 @@ pub fn run(source: &Path, to: &str, block_size: u32, epoch: u64) -> Result<()> {
 
     wait_for_ack(&mut link, last_seq, Duration::from_secs(600))?;
 
+    // Prove the whole target equals the source before declaring success, exactly as the ebpf path
+    // does: send our Merkle root over the source and require a signed receipt whose target root
+    // matches. Without this the default path committed on a bare ack, so any coverage gap (a dropped
+    // tail, an acknowledgement watermark that legitimately did not advance) would be reported as
+    // "verified" when it was not. This is the end-to-end backstop behind the receiver's gap-free ack.
+    let source_root = device_root(&src, src_len)?;
+    seq += 1;
+    link.send(encode(
+        epoch,
+        FrameSeq(seq),
+        &Message::FinalRoot { root: source_root },
+    )?);
+    link.flush(Duration::from_secs(60))
+        .map_err(|_| anyhow::anyhow!("the link cut while sending the final root"))?;
+    let receipt = wait_for_receipt(&mut link, Duration::from_secs(120))?;
+    check_receipt(&receipt, source_root)?;
+
     seq += 1;
     link.send(encode(
         epoch,
@@ -106,8 +124,54 @@ pub fn run(source: &Path, to: &str, block_size: u32, epoch: u64) -> Result<()> {
     link.flush(Duration::from_secs(30))
         .map_err(|_| anyhow::anyhow!("the link cut before the commit was delivered"))?;
 
-    println!("send: copied and verified {src_len} bytes to {to}");
+    println!(
+        "send: copied and verified {src_len} bytes to {to}; receipt signed by {}, roots match",
+        hex16(&receipt.receiver_key)
+    );
     Ok(())
+}
+
+/// Waits for the receiver's signed byte-equality receipt after a `FinalRoot`.
+fn wait_for_receipt(link: &mut TcpLink, timeout: Duration) -> Result<Receipt> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match link.recv() {
+            Ok(Some(frame)) => {
+                if let Ok((_, _, Message::Receipt { receipt })) = decode(&frame) {
+                    return Ok(receipt);
+                }
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    bail!("timed out waiting for the receiver's receipt");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(LinkError::Cut) => bail!("the link cut before the receipt arrived"),
+        }
+    }
+}
+
+/// Verifies a receipt: valid signature, the source root we sent, and byte-equal roots.
+fn check_receipt(receipt: &Receipt, source_root: [u8; 32]) -> Result<()> {
+    if !receipt.verify() {
+        bail!("the receipt's signature does not verify");
+    }
+    if receipt.source_root != source_root {
+        bail!("the receipt's source root does not match what we sent");
+    }
+    if !receipt.roots_match() {
+        bail!(
+            "BYTE-EQUALITY FAILED: the target does not equal the source (source root {}, target root {})",
+            hex16(&receipt.source_root),
+            hex16(&receipt.target_root)
+        );
+    }
+    Ok(())
+}
+
+fn hex16(bytes: &[u8; 32]) -> String {
+    bytes[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Reads acknowledgements and blocks while the outgoing buffer is above the high-water mark.
@@ -152,6 +216,42 @@ fn wait_for_ack(link: &mut TcpLink, target: u64, timeout: Duration) -> Result<()
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    const SEED: [u8; 32] = [0x5a; 32];
+
+    fn signed(source_root: [u8; 32], target_root: [u8; 32]) -> Receipt {
+        let mut receipt = Receipt::new(
+            "run-test".to_string(),
+            7,
+            1 << 20,
+            1 << 20,
+            1u32 << 20,
+            source_root,
+            target_root,
+            "t".to_string(),
+            "t".to_string(),
+            0,
+        );
+        receipt.sign_with_seed(&SEED);
+        receipt
+    }
+
+    #[test]
+    fn check_receipt_requires_signature_our_source_root_and_equal_roots() {
+        let root = [7u8; 32];
+        // Round-trip success: signed, our source root, byte-equal roots.
+        assert!(check_receipt(&signed(root, root), root).is_ok());
+        // Tampered / short-coverage target: source and target roots differ.
+        assert!(check_receipt(&signed(root, [9u8; 32]), root).is_err());
+        // A receipt for a different source than the one we sent.
+        assert!(check_receipt(&signed([1u8; 32], [1u8; 32]), root).is_err());
+    }
+}
+
 #[cfg(feature = "ebpf")]
 mod live {
     use std::path::Path;
@@ -161,12 +261,12 @@ mod live {
     use bootshift_disk::{Access, BlockDevice};
     use bootshift_migrate_core::{
         Advice, Codec, ConvergenceModel, DirtySet, DiskRange, Epoch, FrameSeq, MAX_EXTENT, Message,
-        PROTOCOL_VERSION, PassKind, PassStats, Receipt, Role, decode, encode,
+        PROTOCOL_VERSION, PassKind, PassStats, Role, encode,
     };
-    use bootshift_migrate_net::{Link, LinkError, TcpLink};
+    use bootshift_migrate_net::{Link, TcpLink};
     use bootshift_migrate_track::{Drained, EbpfTracker, Tracker};
 
-    use super::{CHUNK, drain_to_high_water, wait_for_ack};
+    use super::{CHUNK, check_receipt, drain_to_high_water, hex16, wait_for_ack, wait_for_receipt};
     use crate::common::{device_root, freeze, open_device, recv_message, thaw};
 
     const MAX_PASSES: usize = 40;
@@ -453,47 +553,6 @@ mod live {
             bytes
         };
         Ok((bytes, rate.max(1), duration))
-    }
-
-    fn wait_for_receipt(link: &mut TcpLink, timeout: Duration) -> Result<Receipt> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match link.recv() {
-                Ok(Some(frame)) => {
-                    if let Ok((_, _, Message::Receipt { receipt })) = decode(&frame) {
-                        return Ok(receipt);
-                    }
-                }
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        bail!("timed out waiting for the receiver's receipt");
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                Err(LinkError::Cut) => bail!("the link cut before the receipt arrived"),
-            }
-        }
-    }
-
-    fn check_receipt(receipt: &Receipt, source_root: [u8; 32]) -> Result<()> {
-        if !receipt.verify() {
-            bail!("the receipt's signature does not verify");
-        }
-        if receipt.source_root != source_root {
-            bail!("the receipt's source root does not match what we sent");
-        }
-        if !receipt.roots_match() {
-            bail!(
-                "BYTE-EQUALITY FAILED: the target does not equal the source (source root {}, target root {})",
-                hex16(&receipt.source_root),
-                hex16(&receipt.target_root)
-            );
-        }
-        Ok(())
-    }
-
-    fn hex16(bytes: &[u8; 32]) -> String {
-        bytes[..8].iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 

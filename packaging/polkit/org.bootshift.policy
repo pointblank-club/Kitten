@@ -5,6 +5,15 @@
 <policyconfig>
   <vendor>Kitten</vendor>
 
+  <!--
+    Accepted design decision (see SECURITY.md threat model): the inspect action is read-only. It
+    lists disks and runs Kitten's safety checks, which drive probe tools (lsblk, blkid, dumpe2fs,
+    findmnt) as root but never write to a disk, so an active local user may run it without a
+    password (allow_active=yes) and the GUI can show the layout on open. It discloses only partition
+    layout to someone already at the active session; device paths are exact-matched against the
+    enumerated disks and no value reaches a shell. Every MUTATING operation is the separate `apply`
+    action below, which always requires admin authentication.
+  -->
   <action id="org.bootshift.inspect">
     <description>Read the disk layout and run Kitten's safety checks</description>
     <message>Authentication is required to read the disk layout</message>

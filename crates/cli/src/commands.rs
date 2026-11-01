@@ -68,7 +68,17 @@ pub fn apply(
         None => std::env::current_exe().context("finding the bootshift binary")?,
     };
     let work_dir = std::env::temp_dir().join(format!("bootshift-{}", std::process::id()));
-    std::fs::create_dir_all(&work_dir).context("creating a work directory")?;
+    // Create it private (0o700) and fail closed on a pre-existing directory: this holds the recovery
+    // initramfs, so a predictable name in a shared /tmp must not be pre-created or symlinked by
+    // another user to capture it. (Mirrors the daemon's apply path.)
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(false)
+            .mode(0o700)
+            .create(&work_dir)
+            .with_context(|| format!("creating a private work directory {}", work_dir.display()))?;
+    }
     let result = service::apply(
         &SystemRunner,
         &SystemPaths::default(),

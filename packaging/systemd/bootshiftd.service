@@ -6,3 +6,36 @@ Description=Kitten partition helper
 Type=dbus
 BusName=org.bootshift.Helper1
 ExecStart=/usr/libexec/bootshift/bootshiftd
+
+# Hardening. The helper runs as root and drives disk tools, so it needs raw block
+# device and tool access; the sandbox below removes everything it does NOT need.
+# Deliberately NOT set, because they would break the helper's job:
+#   PrivateDevices / ProtectSystem=strict  -> needed to read/write /dev/<disk> and the ESP.
+NoNewPrivileges=yes
+# These debug-only overrides are also compiled out of release builds; clearing them here is
+# defence in depth so a stray environment entry can never reach the service. SKIP_POLKIT would
+# waive authorization; EXTRA_KERNEL_ARGS would inject arguments into the recovery boot command line.
+UnsetEnvironment=BOOTSHIFT_SKIP_POLKIT
+UnsetEnvironment=BOOTSHIFT_EXTRA_KERNEL_ARGS
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Restrict the address families the service and its disk-tool children may use: D-Bus is over
+# AF_UNIX, and blkid/lsblk/udev use AF_NETLINK. No network sockets are needed.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# Seccomp allow-list. @system-service is the standard service set; @obsolete is dropped. @mount is
+# deliberately NOT granted: bootshiftd and the disk tools it spawns (ldd, dumpe2fs, xfs_db, btrfs,
+# blkid, lsblk, smartctl, resize2fs, mkfs) never call mount(2)/umount2 — all mounting happens in the
+# separate `bootshift` recovery binary that runs as PID 1 in the initramfs, outside this unit.
+# NOTE: the filter is inherited by those children, so it may need widening if a tool trips an
+# unexpected syscall at runtime — validate on the box/VM, and prefer widening over removing it.
+SystemCallFilter=@system-service
+SystemCallFilter=~@obsolete
+SystemCallErrorNumber=EPERM

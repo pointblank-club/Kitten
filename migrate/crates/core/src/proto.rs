@@ -1,7 +1,8 @@
 //! The wire protocol (architecture A1, implementation I3). A frame on the wire is
 //! `[len: u32 LE][epoch: u64 LE][seq: u64 LE][body][crc32c: u32 LE]`, where `body` is the
-//! postcard encoding of a [`Message`]. The CRC catches our own framing bugs; TLS catches
-//! tampering. Decoding never trusts its input: a truncated, oversized or corrupt frame is a typed
+//! postcard encoding of a [`Message`]. The CRC catches our own framing bugs only; it is NOT a
+//! security control, and the transport is currently plaintext with no authentication (see
+//! `net::lib` and the security audit). Decoding never trusts its input: a truncated, oversized or corrupt frame is a typed
 //! error, never a panic, which the round-trip and garbage proptests check.
 
 use serde::{Deserialize, Serialize};

@@ -23,6 +23,36 @@ const BATCH_BYTES: usize = 16 << 20;
 /// The receiver's demo signing key seed. A real receiver uses a persistent identity key.
 const RECEIVER_KEY_SEED: [u8; 32] = [0x5a; 32];
 
+/// Tracks whether the target has been proved byte-equal to the source and still is. A FinalRoot
+/// records whether the roots matched; any chunk applied after that proof invalidates it; a commit
+/// is only honoured while the proof still holds. This is what makes a "verified" commit mean
+/// "nothing changed after the proof".
+#[derive(Default)]
+struct CommitGate {
+    verified: bool,
+    final_seen: bool,
+}
+
+impl CommitGate {
+    /// A data chunk arrived. After a proof has been taken, it no longer describes the target.
+    fn on_chunk(&mut self) {
+        if self.final_seen {
+            self.verified = false;
+        }
+    }
+
+    /// A FinalRoot was processed; `roots_match` is whether the target equalled the source.
+    fn on_final_root(&mut self, roots_match: bool) {
+        self.verified = roots_match;
+        self.final_seen = true;
+    }
+
+    /// Whether a commit may be reported as success right now.
+    fn may_commit(&self) -> bool {
+        self.verified
+    }
+}
+
 pub fn run(
     data: &Path,
     scratch: &Path,
@@ -57,12 +87,31 @@ pub fn run(
     let mut batch: Vec<IncomingChunk> = Vec::new();
     let mut batch_bytes = 0usize;
     let mut source_len = data_len;
+    // Tracks whether the target has been proved byte-equal to the source and still is: a commit is
+    // only honoured while that proof holds, so a bare Committed (no proof) or a write after the
+    // proof cannot be reported as success.
+    let mut gate = CommitGate::default();
     loop {
         match link.recv() {
             Ok(Some(frame)) => {
-                let (_, seq, message) = decode(&frame).context("decoding a frame")?;
+                let (frame_epoch, seq, message) = decode(&frame).context("decoding a frame")?;
+                // Reject frames that do not belong to this run's epoch (replay / cross-run
+                // confusion). Legitimate frames always carry the current epoch.
+                if frame_epoch.0 != epoch.0 {
+                    continue;
+                }
                 match message {
                     Message::Hello { disk_len, .. } => {
+                        // Validate the source length against the real target before trusting it: it
+                        // later drives device_root (buffer/leaf allocation sized by source_len), so an
+                        // attacker-chosen huge disk_len would otherwise be a remote OOM/abort. The
+                        // source must also fit the target, or the migration cannot complete.
+                        if disk_len > data_len {
+                            anyhow::bail!(
+                                "the source claims {disk_len} bytes but the target is only {data_len}; \
+                                 refusing"
+                            );
+                        }
                         source_len = disk_len;
                         link.send(encode(
                             epoch,
@@ -81,6 +130,9 @@ pub fn run(
                     Message::Chunk {
                         source, hash, data, ..
                     } => {
+                        // Data after a proof invalidates it: the target has changed since the root
+                        // was computed, so a later commit must not claim the old verification.
+                        gate.on_chunk();
                         batch_bytes += data.len();
                         batch.push(IncomingChunk {
                             seq,
@@ -110,6 +162,9 @@ pub fn run(
                             epoch,
                         )?;
                         batch_bytes = 0;
+                        // The PassEnd consumed this seq without a chunk; bridge it so the next pass's
+                        // first chunk stays contiguous and is not discarded by the coverage walk.
+                        applier.cover_control_seq(seq);
                         println!(
                             "receive: pass complete, acknowledged through seq {}",
                             applier.acked().0
@@ -126,7 +181,12 @@ pub fn run(
                             epoch,
                         )?;
                         batch_bytes = 0;
-                        let target_root = device_root(&target, data_len)
+                        // Compute the target root over exactly the SOURCE byte range the sender's
+                        // FinalRoot covers, not the full target device: when the target is larger
+                        // than the source, hashing the whole device would never match (false
+                        // negative). `source_len` is the sender's disk_len from the Hello.
+                        // NOTE: needs the two-VM migrate-rig to validate end to end.
+                        let target_root = device_root(&target, source_len)
                             .context("computing the target root for the receipt")?;
                         let now = now_iso();
                         let mut receipt = Receipt::new(
@@ -143,6 +203,7 @@ pub fn run(
                         );
                         receipt.sign_with_seed(&RECEIVER_KEY_SEED);
                         let matched = receipt.roots_match();
+                        gate.on_final_root(matched);
                         if let Some(path) = receipt_out {
                             let json = serde_json::to_vec_pretty(&receipt)
                                 .context("serialising the receipt")?;
@@ -158,6 +219,15 @@ pub fn run(
                         );
                     }
                     Message::Committed { .. } => {
+                        // Refuse a commit that is not currently backed by a matching FinalRoot: the
+                        // target has not been proved equal to the source (or changed after the
+                        // proof), so success would be a false claim.
+                        if !gate.may_commit() {
+                            anyhow::bail!(
+                                "the source sent a commit without a verified final root; refusing \
+                                 to report success (the target was not proved equal to the source)"
+                            );
+                        }
                         println!("receive: source committed; the target is written and verified");
                         return Ok(());
                     }
@@ -201,4 +271,42 @@ fn apply(
     batch.clear();
     link.send(encode(epoch, acked, &Message::Ack { acked_seq: acked.0 })?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommitGate;
+
+    #[test]
+    fn nothing_is_committable_before_a_proof() {
+        let gate = CommitGate::default();
+        assert!(!gate.may_commit());
+    }
+
+    #[test]
+    fn a_matching_proof_is_committable() {
+        let mut gate = CommitGate::default();
+        gate.on_chunk(); // normal streaming before the proof does not matter
+        gate.on_final_root(true);
+        assert!(gate.may_commit());
+    }
+
+    #[test]
+    fn a_non_matching_proof_is_not_committable() {
+        let mut gate = CommitGate::default();
+        gate.on_final_root(false);
+        assert!(!gate.may_commit());
+    }
+
+    #[test]
+    fn a_write_after_the_proof_invalidates_it() {
+        let mut gate = CommitGate::default();
+        gate.on_final_root(true);
+        assert!(gate.may_commit());
+        gate.on_chunk(); // data landed after the proof was taken
+        assert!(
+            !gate.may_commit(),
+            "a post-proof write must not stay verified"
+        );
+    }
 }

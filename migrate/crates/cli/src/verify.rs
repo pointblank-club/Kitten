@@ -32,21 +32,22 @@ pub fn run(
     check("the receiver's signature is valid", receipt.verify());
     check("the source and target roots match", receipt.roots_match());
 
+    // Both roots cover exactly the migrated source byte range (the sender's FinalRoot and the
+    // receiver's target root are both computed over source_len), not the whole device, so a disk
+    // larger than the source still verifies. Hashing device.len_bytes() here was the same bug as
+    // MIG-01 in receive.rs. NOTE: wants the two-VM migrate-rig for full end-to-end validation.
+    let covered = receipt.source_len;
     if let Some(path) = source {
         let device = open_device(path, Access::ReadOnly, block_size)?;
-        let root = device_root(&device, device.len_bytes())?;
-        check(
-            "this source disk matches the receipt's source root",
-            root == receipt.source_root,
-        );
+        let ok =
+            device.len_bytes() >= covered && device_root(&device, covered)? == receipt.source_root;
+        check("this source disk matches the receipt's source root", ok);
     }
     if let Some(path) = target {
         let device = open_device(path, Access::ReadOnly, block_size)?;
-        let root = device_root(&device, device.len_bytes())?;
-        check(
-            "this target disk matches the receipt's target root",
-            root == receipt.target_root,
-        );
+        let ok =
+            device.len_bytes() >= covered && device_root(&device, covered)? == receipt.target_root;
+        check("this target disk matches the receipt's target root", ok);
     }
 
     if failures > 0 {

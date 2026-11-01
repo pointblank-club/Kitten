@@ -18,11 +18,35 @@ const NVMET: &str = "/sys/kernel/config/nvmet";
 
 /// Receiver: export `dev` (the target PV partition) over nvme-tcp under `nqn`, listening on
 /// `listen:port`. The export lives in configfs, so it persists after this process returns.
-pub fn export(dev: &str, listen: &str, port: u16, nqn: &str) -> Result<()> {
+///
+/// `host_nqn` is the initiator (sender) NQN permitted to connect. When given, only that host may
+/// attach; when `None`, the export is readable AND writable by any host that can reach the port,
+/// which exposes every raw block of the migrating disk, so that path warns loudly.
+pub fn export(dev: &str, listen: &str, port: u16, nqn: &str, host_nqn: Option<&str>) -> Result<()> {
     ensure_configfs()?;
     let subsystem = format!("{NVMET}/subsystems/{nqn}");
     mkdir(&subsystem)?;
-    write(&format!("{subsystem}/attr_allow_any_host"), "1")?;
+    match host_nqn {
+        Some(host) => {
+            // Restrict to the one initiator: register it under hosts/ and link it into the
+            // subsystem's allowed_hosts, with any-host access turned off.
+            mkdir(&format!("{NVMET}/hosts/{host}"))?;
+            let allowed = format!("{subsystem}/allowed_hosts/{host}");
+            if !Path::new(&allowed).exists() {
+                std::os::unix::fs::symlink(format!("{NVMET}/hosts/{host}"), &allowed)
+                    .with_context(|| format!("allowing host {host} at {allowed}"))?;
+            }
+            write(&format!("{subsystem}/attr_allow_any_host"), "0")?;
+        }
+        None => {
+            write(&format!("{subsystem}/attr_allow_any_host"), "1")?;
+            eprintln!(
+                "mirror: WARNING: exporting {dev} with no host restriction; any host that can reach \
+                 {listen}:{port} can read and write the target disk. Pass --host-nqn <initiator> to \
+                 restrict it."
+            );
+        }
+    }
     let namespace = format!("{subsystem}/namespaces/1");
     mkdir(&namespace)?;
     write(&format!("{namespace}/device_path"), dev)?;

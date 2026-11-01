@@ -73,12 +73,16 @@ pub fn run(
     let mut journal = opened.journal;
 
     if opened.progress.is_none() {
-        let refusal = if !table_matches(&disk, &run)? {
-            Some(RecoveryError::LayoutChanged)
-        } else {
-            check_table_writes(&disk, &run.layout, &run.plan)
+        // On a fresh run, every reason we can't carry out the plan must reach restore_booting below,
+        // never propagate before it, or the GRUB redirect is left in place and the machine
+        // boot-loops into recovery. A table_matches error is now possible (entries() rejects a
+        // corrupt/out-of-range GPT), so route it to the same safe path as a changed layout.
+        let refusal = match table_matches(&disk, &run) {
+            Ok(true) => check_table_writes(&disk, &run.layout, &run.plan)
                 .err()
-                .map(RecoveryError::CantCarryOut)
+                .map(RecoveryError::CantCarryOut),
+            Ok(false) => Some(RecoveryError::LayoutChanged),
+            Err(error) => Some(error),
         };
         if let Some(refusal) = refusal {
             restore_booting(runner, disk_path, &run.boot, &work_dir.join("esp"))?;
@@ -252,6 +256,17 @@ mod tests {
 
         assert!(table_matches(&planned, &run).unwrap());
         assert!(!table_matches(&disk_with_partition(200), &run).unwrap());
+    }
+
+    #[test]
+    fn an_unreadable_table_makes_table_matches_refuse_not_abort() {
+        // A corrupt/unreadable GPT surfaces as an Err from GptImage::read / entries() (the latter now
+        // rejects out-of-range LBAs instead of overflowing). table_matches must return that Err, not
+        // panic, so run() can route it to restore_booting on a fresh run rather than propagating
+        // before the safety net and leaving the GRUB redirect in place (ENG-02).
+        let run = run_for(&disk_with_partition(100));
+        let unreadable = MemDisk::zeroed(1 << 20, 512).unwrap();
+        assert!(table_matches(&unreadable, &run).is_err());
     }
 
     #[test]

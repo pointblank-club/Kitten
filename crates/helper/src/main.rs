@@ -111,6 +111,16 @@ fn apply(
     target: &str,
     recovery_binary: &Path,
 ) -> Result<responses::Applied, ServiceError> {
+    // Serialize applies. zbus dispatches method calls concurrently and `run_blocking` offloads each
+    // to a thread, so two overlapping applies would otherwise race on shared ESP state (journal.bin,
+    // initrd.img, recovery-args.txt, the GRUB redirect, and the non-atomic global EFI BootOrder
+    // read-modify-write). Hold this lock for the whole apply; inspect/probe/check stay concurrent.
+    // Acquired on the blocking thread (never across an await), so a std mutex is correct here.
+    static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = APPLY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let inspected = service::inspect(&SystemRunner, Path::new(disk))?;
     let plan = service::plan_target(&inspected.layout, &responses::parse_target(target)?)?;
     // Unique per call: a fixed name would collide across concurrent applies and leave a
@@ -118,7 +128,25 @@ fn apply(
     static APPLY_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let call = APPLY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let work_dir = std::env::temp_dir().join(format!("bootshiftd-{}-{call}", std::process::id()));
-    let _ = std::fs::create_dir_all(&work_dir);
+    // Create it private (0o700) and fail the call if we cannot: the work dir holds the recovery
+    // initramfs we are about to install, so a world-readable or attacker-pre-created directory in
+    // a shared /tmp must never be silently reused. `recursive(false)` is deliberate: it errors
+    // (AlreadyExists) instead of adopting a pre-existing directory with someone else's mode, which
+    // `recursive(true)` would do — the parent temp dir already exists, and the pid+counter name
+    // makes a legitimate collision practically impossible.
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(false)
+            .mode(0o700)
+            .create(&work_dir)
+            .map_err(|e| {
+                ServiceError::Refused(vec![bootshift_core::refusal::Refusal::new(
+                    format!("could not create a private work directory: {e}"),
+                    "check permissions on the system temp directory and retry",
+                )])
+            })?;
+    }
     let result = service::apply(
         &SystemRunner,
         &SystemPaths::default(),

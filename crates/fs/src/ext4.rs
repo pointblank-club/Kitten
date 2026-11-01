@@ -3,7 +3,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use crate::parse::{complement, field, number_field, unexpected};
+use crate::parse::{blocks_to_bytes, complement, field, number_field, unexpected};
 use crate::run::{CommandLine, RunError, Runner};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,8 +18,10 @@ pub struct Ext4Summary {
 }
 
 impl Ext4Summary {
+    /// Saturates rather than wrapping on overflow: a filesystem claiming more bytes than
+    /// a u64 can hold will be larger than any real device and get refused downstream.
     pub fn len_bytes(&self) -> u64 {
-        self.block_count * self.block_size
+        self.block_count.saturating_mul(self.block_size)
     }
 }
 
@@ -41,7 +43,7 @@ pub fn min_size(runner: &dyn Runner, device: &Path, block_size: u64) -> Result<u
     let command = CommandLine::new("resize2fs").arg("-P").path(device);
     let output = runner.run_ok(&command)?;
     number_field(&output.text(), "Estimated minimum size of the filesystem")
-        .map(|blocks| blocks * block_size)
+        .and_then(|blocks| blocks_to_bytes(blocks, block_size))
         .map_err(|detail| unexpected(&command, detail))
 }
 
@@ -70,16 +72,31 @@ pub fn grow_online(runner: &dyn Runner, device: &Path) -> Result<(), RunError> {
 }
 
 pub fn parse_summary(text: &str) -> Result<Ext4Summary, String> {
-    let state = field(text, "Filesystem state").ok_or("missing \"Filesystem state\"")?;
-    let features = field(text, "Filesystem features").unwrap_or_default();
-    let error_count = match field(text, "FS Error count") {
+    let state = field(text, "Filesystem state")?.ok_or("missing \"Filesystem state\"")?;
+    let features = field(text, "Filesystem features")?.unwrap_or_default();
+    let error_count = match field(text, "FS Error count")? {
         Some(_) => number_field(text, "FS Error count")?,
         None => 0,
     };
+    let block_size = number_field(text, "Block size")?;
+    if block_size == 0 {
+        // A zero block size would collapse every used byte-range to 0..0 (blocks_to_bytes with a
+        // zero multiplier), so the mover would skip live data. Refuse it like NTFS already does.
+        return Err("block size is zero".to_string());
+    }
+    let block_count = number_field(text, "Block count")?;
+    let free_blocks = number_field(text, "Free blocks")?;
+    if free_blocks > block_count {
+        // An impossible superblock; without this, used = block_count - free_blocks underflows
+        // (aborting under overflow-checks) in callers such as the inspect probe.
+        return Err(format!(
+            "{free_blocks} free blocks exceeds the {block_count}-block filesystem"
+        ));
+    }
     Ok(Ext4Summary {
-        block_size: number_field(text, "Block size")?,
-        block_count: number_field(text, "Block count")?,
-        free_blocks: number_field(text, "Free blocks")?,
+        block_size,
+        block_count,
+        free_blocks,
         clean: state == "clean",
         needs_recovery: features.split_whitespace().any(|f| f == "needs_recovery"),
         error_count,
@@ -102,30 +119,61 @@ pub fn parse_used_ranges(dumpe2fs: &str) -> Result<Vec<Range<u64>>, String> {
         }
     }
 
-    let free_count: u64 = free.iter().map(|r| r.end - r.start).sum();
+    // Reject any free range that runs past the filesystem. `complement` clamps out-of-range ranges,
+    // which would relocate coverage and could drop a real used block from the result (skipped data);
+    // mirror the xfs bound and refuse instead. (parse_block_range already guarantees start < end.)
+    for r in &free {
+        if r.end > summary.block_count {
+            return Err(format!(
+                "a free block range ends at {} past the {}-block filesystem",
+                r.end, summary.block_count
+            ));
+        }
+    }
+    // Checked sum: the ranges come from untrusted dumpe2fs output, so a crafted list must produce a
+    // clean error rather than overflow and abort before the consistency comparison below.
+    let free_count = free.iter().try_fold(0u64, |acc, r| {
+        acc.checked_add(r.end - r.start)
+            .ok_or_else(|| "free block counts overflow a 64-bit total".to_string())
+    })?;
     if free_count != summary.free_blocks {
         return Err(format!(
             "groups list {free_count} free blocks but the superblock says {}",
             summary.free_blocks
         ));
     }
-    Ok(complement(free, summary.block_count)
+    complement(free, summary.block_count)
         .into_iter()
-        .map(|r| r.start * summary.block_size..r.end * summary.block_size)
-        .collect())
+        .map(|r| {
+            Ok(blocks_to_bytes(r.start, summary.block_size)?
+                ..blocks_to_bytes(r.end, summary.block_size)?)
+        })
+        .collect()
 }
 
-/// Parses `12` or `12-40` (inclusive) into a half-open block range.
+/// Parses `12` or `12-40` (inclusive) into a half-open block range. The values come from
+/// untrusted `dumpe2fs` output, so a reversed range or a block number at `u64::MAX` must be a
+/// clean error, not a reversed span or (under release `overflow-checks`) a process abort.
 fn parse_block_range(item: &str) -> Result<Range<u64>, String> {
     let parse = |s: &str| {
         s.parse::<u64>()
             .map_err(|_| format!("bad block number in \"{item}\""))
     };
+    let end_after = |last: u64| {
+        last.checked_add(1)
+            .ok_or_else(|| format!("block range ends at u64::MAX in \"{item}\""))
+    };
     match item.split_once('-') {
-        Some((first, last)) => Ok(parse(first)?..parse(last)? + 1),
+        Some((first, last)) => {
+            let (first, last) = (parse(first)?, parse(last)?);
+            if first > last {
+                return Err(format!("reversed block range \"{item}\""));
+            }
+            Ok(first..end_after(last)?)
+        }
         None => {
             let block = parse(item)?;
-            Ok(block..block + 1)
+            Ok(block..end_after(block)?)
         }
     }
 }
@@ -136,6 +184,24 @@ mod tests {
 
     const DUMPE2FS: &str = include_str!("../tests/fixtures/ext4/dumpe2fs.txt");
     const TUNE2FS: &str = include_str!("../tests/fixtures/ext4/tune2fs-l.txt");
+
+    #[test]
+    fn an_injected_block_size_line_is_refused() {
+        // A volume label that embedded a newline injects a fake "Block size:512" ahead of the real
+        // one. Taking the first would make used_ranges ~8x too small and silently skip live data, so
+        // the duplicate key must be refused.
+        let text = "Filesystem volume name: x\nBlock size:512\n\
+                    Filesystem state: clean\nBlock size:              4096\n\
+                    Block count:              102400\nFree blocks:              87129\n";
+        assert!(parse_summary(text).is_err());
+    }
+
+    #[test]
+    fn free_blocks_exceeding_block_count_is_refused() {
+        let text = "Filesystem state: clean\nBlock size: 4096\n\
+                    Block count: 100\nFree blocks: 200\n";
+        assert!(parse_summary(text).is_err());
+    }
 
     #[test]
     fn parses_the_superblock_summary() {

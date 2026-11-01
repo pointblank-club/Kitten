@@ -3,7 +3,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use crate::parse::unexpected;
+use crate::parse::{blocks_to_bytes, unexpected};
 use crate::run::{CommandLine, RunError, Runner};
 
 /// Grows the mounted filesystem at `mountpoint` to fill its partition.
@@ -67,9 +67,15 @@ impl Geometry {
                 })
                 .ok_or_else(|| format!("no {name} in the superblock output"))
         };
+        let blocksize = field("blocksize")?;
+        if blocksize == 0 {
+            // A zero block size collapses every used range to 0..0, so the mover would skip live
+            // data. Refuse it rather than trusting a corrupt superblock.
+            return Err("blocksize is zero".to_string());
+        }
         Ok(Self {
             dblocks: field("dblocks")?,
-            blocksize: field("blocksize")?,
+            blocksize,
             agblocks: field("agblocks")?,
             logstart: field("logstart")?,
             rbmblocks: field("rbmblocks")?,
@@ -90,9 +96,18 @@ fn parse_freesp(text: &str, geometry: &Geometry) -> Result<Option<Vec<Range<u64>
             continue;
         }
         let (agno, agbno, len) = (columns[0], columns[1], columns[2]);
-        let start = (agno * geometry.agblocks + agbno) * geometry.blocksize;
-        let end = start + len * geometry.blocksize;
-        if end > geometry.dblocks * geometry.blocksize {
+        // All of these come from tool output describing an untrusted disk, so every
+        // multiply and add is checked: a corrupt or hostile superblock refuses cleanly
+        // instead of wrapping (or, under release overflow-checks, aborting the helper).
+        let start_block = agno
+            .checked_mul(geometry.agblocks)
+            .and_then(|v| v.checked_add(agbno))
+            .ok_or_else(|| format!("a free extent's start block overflows: {line}"))?;
+        let start = blocks_to_bytes(start_block, geometry.blocksize)?;
+        let end = blocks_to_bytes(len, geometry.blocksize)?
+            .checked_add(start)
+            .ok_or_else(|| format!("a free extent's end overflows: {line}"))?;
+        if end > blocks_to_bytes(geometry.dblocks, geometry.blocksize)? {
             return Err(format!("a free extent ends past the filesystem: {line}"));
         }
         free.push(start..end);
@@ -109,7 +124,7 @@ fn parse_freesp(text: &str, geometry: &Geometry) -> Result<Option<Vec<Range<u64>
         }
         cursor = range.end;
     }
-    let total = geometry.dblocks * geometry.blocksize;
+    let total = blocks_to_bytes(geometry.dblocks, geometry.blocksize)?;
     if cursor < total {
         used.push(cursor..total);
     }

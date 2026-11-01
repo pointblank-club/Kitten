@@ -58,6 +58,12 @@ fn parse_dev_tree(text: &str) -> Result<Option<Vec<Range<u64>>>, String> {
                 if devid != "1" {
                     return Ok(None);
                 }
+                // A new extent key before the previous one's length line means we would otherwise
+                // overwrite `offset` and silently drop that allocated extent (the mover would then
+                // skip live data). Treat it as malformed output instead.
+                if offset.is_some() {
+                    return Err(format!("dev extent key without a preceding length: {line}"));
+                }
                 let text = words.next().unwrap_or_default().trim_end_matches(')');
                 offset = Some(
                     text.parse()
@@ -71,7 +77,12 @@ fn parse_dev_tree(text: &str) -> Result<Option<Vec<Range<u64>>>, String> {
                 .unwrap_or_default()
                 .parse()
                 .map_err(|_| format!("bad extent length: {line}"))?;
-            ranges.push(start..start + len);
+            // Values come from untrusted tool output; refuse an overflowing extent rather than
+            // wrapping or (under release overflow-checks) aborting, as xfs already does.
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| format!("dev extent overflows a 64-bit size: {line}"))?;
+            ranges.push(start..end);
             offset = None;
         }
     }

@@ -51,3 +51,7 @@ single_range_in_vec_init = "allow"
 lto = true
 codegen-units = 1
 panic = "abort"
+# A silent integer wrap could point a copy at the wrong disk offset; aborting fails closed, and the
+# journal lets the move resume. Parsers of untrusted input use checked arithmetic for a graceful
+# refusal rather than relying on this.
+overflow-checks = true

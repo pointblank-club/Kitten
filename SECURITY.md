@@ -31,6 +31,13 @@ Because this tool touches data and boot, the following are in scope alongside cl
 - **A violated safety invariant**: for example writing before preflight passes, changing the partition table before data is verified in place, or marking a chunk done before `fdatasync` returns.
 - **Privilege or boot issues**: escaping the polkit check on the D-Bus helper, or a boot redirect that could run unverified code at startup.
 
+## Accepted risks and threat model
+
+A few behaviours are deliberate and are **not** considered vulnerabilities:
+
+- **Read-only inspect runs without a password.** The `org.bootshift.inspect` polkit action (list disks, run the safety checks) is `allow_active=yes`, so an active local user can read the disk layout without authenticating and the GUI can show it on open. It drives probe tools (`lsblk`, `blkid`, `dumpe2fs`, `findmnt`) as root but never writes to a disk, device paths are exact-matched against the enumerated disks, and nothing reaches a shell. The only exposure is disk-layout disclosure to someone already at the active session. Every **mutating** operation is the separate `org.bootshift.apply` action, which always requires admin authentication (`auth_admin`, never `auth_admin_keep`).
+- **Live machine-to-machine migration transport is not yet authenticated or encrypted.** The `migrate` subsystem currently moves data over plaintext TCP with no mutual authentication; this is unreleased and documented in the code. Mutual auth / TLS and receiver identity pinning are required before migration ships and are tracked as such. The receiver does enforce a gap-free acknowledgement watermark and a signed whole-disk byte-equality receipt before reporting success, which bounds (but does not replace) that work.
+
 ## Our commitments
 
 - We will not weaken or bypass a safety check or crash test to ship a fix faster.
