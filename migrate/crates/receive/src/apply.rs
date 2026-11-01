@@ -310,7 +310,7 @@ mod tests {
         // acknowledgement past the chunks it skipped, and must not write to the target.
         let source = source();
         let mut target = MemDisk::zeroed(SRC_LEN as usize, 4096).expect("target");
-        let before = target.bytes();
+        let before = target.bytes().to_vec();
         let mut scratch = MemDisk::zeroed(32 << 20, 4096).expect("scratch");
         let mut applier = Applier::new(1, Epoch(7), identity_layout(SRC_LEN), SRC_LEN);
         let chunks = single_chunks(&source, 256 * 1024);
@@ -327,7 +327,7 @@ mod tests {
         );
         assert_eq!(
             target.bytes(),
-            before,
+            before.as_slice(),
             "the skipped-ahead chunk must not be written"
         );
     }
