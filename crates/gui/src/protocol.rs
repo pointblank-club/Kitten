@@ -51,6 +51,17 @@ pub struct Applied {
     pub restart_to_begin: bool,
 }
 
+/// The outcome of the last run, read back after the restart that applied it. The helper reads
+/// this from the journal the recovery system left on the EFI partition, so reopening Kitten
+/// after the reboot shows the finished result instead of the goal launcher.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct FinishedRun {
+    pub bytes: u64,
+    pub chunks: u64,
+    pub power_cuts: u32,
+    pub seconds: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

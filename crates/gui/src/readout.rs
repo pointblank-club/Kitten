@@ -23,7 +23,6 @@ pub fn show(ui: &mut Ui, app: &App) {
         },
         Screen::Plan => plan(ui, app),
         Screen::Checks => checks(ui, app),
-        Screen::Restart => restart(ui),
         Screen::Done => done(ui, app),
         Screen::Migrate => {}
     }
@@ -395,35 +394,6 @@ fn checks(ui: &mut Ui, app: &App) {
         &[
             "Kitten copies its recovery system onto the EFI partition and points the next boot at it. Your disk is not touched yet.",
             "The work happens during the restart you choose, before any operating system starts.",
-        ],
-    );
-}
-
-fn restart(ui: &mut Ui) {
-    readout_heading(ui, "If the power goes out");
-    readout_texts(
-        ui,
-        &[
-            "Turn the computer back on. Kitten reads its journal, finds the last chunk the drive confirmed, and carries on from there.",
-            "A half-written chunk is simply redone: a chunk is never larger than the distance it moves, so it can never overwrite its own source.",
-        ],
-    );
-    block_gap(ui);
-    readout_heading(ui, "What never happens");
-    facts(
-        ui,
-        &[
-            ("Table before data", "never".to_string(), Tone::Plain),
-            (
-                "Unverified chunk",
-                "never journaled".to_string(),
-                Tone::Plain,
-            ),
-            (
-                "Boot into a half-moved disk",
-                "blocked".to_string(),
-                Tone::Plain,
-            ),
         ],
     );
 }

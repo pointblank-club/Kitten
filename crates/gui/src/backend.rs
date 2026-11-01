@@ -10,7 +10,7 @@ use std::thread;
 use bootshift_core::layout::Target;
 use serde::de::DeserializeOwned;
 
-use crate::protocol::{Applied, CheckResult, DiskSummary, Planned, Probed, Reply};
+use crate::protocol::{Applied, CheckResult, DiskSummary, FinishedRun, Planned, Probed, Reply};
 
 const BUS_NAME: &str = "org.bootshift.Helper1";
 const OBJECT_PATH: &str = "/org/bootshift/Helper1";
@@ -32,6 +32,10 @@ pub trait Backend: Send {
         target: &Target,
     ) -> Result<Reply<Option<Vec<CheckResult>>>, BackendError>;
     fn apply(&mut self, disk: &str, target: &Target) -> Result<Reply<Applied>, BackendError>;
+    /// The outcome of the last applied run, if the recovery system finished one since the last
+    /// time the layout was changed. `None` means there is nothing to reopen onto, so the app
+    /// starts on the goal launcher as usual.
+    fn last_run(&mut self) -> Result<Reply<Option<FinishedRun>>, BackendError>;
 }
 
 /// Each call blocks its (worker) thread until the helper answers.
@@ -102,6 +106,16 @@ impl Backend for HelperBackend {
     fn apply(&mut self, disk: &str, target: &Target) -> Result<Reply<Applied>, BackendError> {
         self.reply("Apply", &(disk, target_json(target)?))
     }
+
+    fn last_run(&mut self) -> Result<Reply<Option<FinishedRun>>, BackendError> {
+        // TODO(helper): the recovery system records the outcome (chunks, bytes, power cuts,
+        // seconds) in the journal on the EFI partition. A `LastRun` D-Bus method should read
+        // that journal and return it so the app reopens onto the finished screen after the
+        // restart. Until that method exists on the helper, report nothing rather than invent a
+        // result, so the real app opens on the launcher as before. Needs the hardware box to
+        // implement and validate.
+        Ok(Reply::Ok { value: None })
+    }
 }
 
 fn target_json(target: &Target) -> Result<String, BackendError> {
@@ -114,6 +128,7 @@ fn failure(error: impl std::fmt::Display) -> BackendError {
 
 pub enum Request {
     ListDisks,
+    LastRun,
     Probe { disk: String },
     Plan { disk: String, target: Target },
     Check { disk: String, target: Target },
@@ -122,6 +137,7 @@ pub enum Request {
 
 pub enum Response {
     Disks(Result<Reply<Vec<DiskSummary>>, BackendError>),
+    LastRun(Result<Reply<Option<FinishedRun>>, BackendError>),
     Probed(Result<Reply<Probed>, BackendError>),
     Planned(Result<Reply<Planned>, BackendError>),
     Checked(Result<Reply<Option<Vec<CheckResult>>>, BackendError>),
@@ -218,6 +234,7 @@ impl Worker {
 fn serve(backend: &mut dyn Backend, request: Request) -> Response {
     match request {
         Request::ListDisks => Response::Disks(backend.list_disks()),
+        Request::LastRun => Response::LastRun(backend.last_run()),
         Request::Probe { disk } => Response::Probed(backend.probe(&disk)),
         Request::Plan { disk, target } => Response::Planned(backend.plan(&disk, &target)),
         Request::Check { disk, target } => Response::Checked(backend.check(&disk, &target)),
